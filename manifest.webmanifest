@@ -1,0 +1,10 @@
+{
+  "name": "Work Time — учёт рабочего времени",
+  "short_name": "Work Time",
+  "lang": "ru",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f6fa",
+  "theme_color": "#111827",
+  "icons": []
+}

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta name="description" content="Учёт рабочего времени, нормы, Jira, отпуск и календарь">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23111827'/%3E%3Cpath d='M19 32a13 13 0 0 1 13-13h13v7H32a6 6 0 1 0 0 12h8v7h-8a13 13 0 0 1-13-13Z' fill='white'/%3E%3C/svg%3E">
+  <title>Work Time</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="./config.js"></script>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app" class="app is-booting">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div>
+          <div class="brand-title" id="brandTitle">Work Time</div>
+          <div class="brand-sub">личный табель</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Навигация">
+        <button class="nav-item active" data-view="dashboard"><span class="nav-icon" data-icon="grid"></span><span>Обзор</span></button>
+        <button class="nav-item" data-view="entries"><span class="nav-icon" data-icon="clock"></span><span>Записи</span></button>
+        <button class="nav-item" data-view="calendar"><span class="nav-icon" data-icon="calendar"></span><span>Календарь</span></button>
+        <button class="nav-item" data-view="templates"><span class="nav-icon" data-icon="zap"></span><span>Быстрые задачи</span></button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon" data-icon="sliders"></span><span>Настройки</span></button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+
+      <button class="cloud-card" id="syncCard" type="button">
+        <div class="cloud-orb"><span data-icon="cloud"></span></div>
+        <div class="cloud-copy">
+          <strong id="syncTitle">Подключить Google</strong>
+          <span id="syncSubtitle">Синхронизация не настроена</span>
+        </div>
+        <span data-icon="chevron-right" class="chevron"></span>
+      </button>
+
+      <div class="sidebar-footer">Данные синхронизируются с Google Sheets</div>
+    </aside>
+
+    <div class="mobile-topbar">
+      <div class="mobile-brand"><div class="brand-mark small"><span></span><span></span><span></span></div><strong id="mobileTitle">Work Time</strong></div>
+      <button class="icon-button ghost" id="mobileSync" aria-label="Синхронизация"><span data-icon="cloud"></span></button>
+    </div>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumb"><span id="pageEyebrow">ОВЕРВЬЮ</span><span class="dot"></span><span id="pageDate"></span></div>
+        <div class="topbar-actions">
+          <label class="month-control"><span data-icon="calendar"></span><input id="monthPicker" type="month"></label>
+          <button class="icon-button" id="refreshButton" aria-label="Обновить"><span data-icon="refresh"></span></button>
+          <button class="avatar" id="accountButton" aria-label="Аккаунт"><span id="avatarLetter">G</span></button>
+        </div>
+      </header>
+
+      <div class="view-stack">
+        <section class="view active" id="view-dashboard">
+          <div class="hero-grid">
+            <div class="hero-card">
+              <div class="hero-top">
+                <div>
+                  <span class="eyebrow-pill">СЕГОДНЯ</span>
+                  <h1 id="heroTitle">Рабочий день</h1>
+                  <p id="heroDateLabel">—</p>
+                </div>
+                <button class="soft-button" id="heroAddButton"><span data-icon="plus"></span> Записать время</button>
+              </div>
+              <div class="hero-progress-row">
+                <div class="progress-ring" id="progressRing"><div class="progress-ring-center"><strong id="todayLogged">0:00</strong><span>из <b id="todayNorm">8:00</b></span></div></div>
+                <div class="hero-metrics">
+                  <div class="hero-metric"><span class="metric-dot purple"></span><div><strong id="todayJira">0:00</strong><span>списано в Jira</span></div></div>
+                  <div class="hero-metric"><span class="metric-dot green"></span><div><strong id="todayBalance">0:00</strong><span>баланс к норме</span></div></div>
+                </div>
+              </div>
+              <div class="hero-bottom">
+                <div class="week-strip" id="weekStrip"></div>
+              </div>
+            </div>
+
+            <div class="timer-card">
+              <div class="timer-head"><span class="eyebrow-pill neutral">БЫСТРАЯ ЗАПИСЬ</span><span class="timer-live" id="timerLive">Готово</span></div>
+              <div class="timer-value" id="timerValue">00:00:00</div>
+              <select id="timerTemplate" class="field compact"><option value="">Выберите задачу</option></select>
+              <div class="timer-row">
+                <button class="timer-button" id="timerButton"><span data-icon="play"></span><span>Старт</span></button>
+                <button class="icon-button secondary" id="timerReset" aria-label="Сбросить таймер"><span data-icon="rotate-ccw"></span></button>
+              </div>
+              <p class="timer-hint">Таймер хранится локально и после остановки превращается в запись.</p>
+            </div>
+          </div>
+
+          <div class="section-title-row">
+            <div><span class="section-kicker">МЕСЯЦ</span><h2>Контроль нормы</h2></div>
+            <span class="month-label" id="monthLabel">—</span>
+          </div>
+          <div class="stats-grid" id="statsGrid"></div>
+
+          <div class="content-grid">
+            <section class="panel wide">
+              <div class="panel-head"><div><h3>По дням</h3><p>Время, норма и Jira за выбранный месяц.</p></div><button class="link-button" data-view-link="calendar">Открыть календарь <span data-icon="arrow-up-right"></span></button></div>
+              <div id="dailyList" class="daily-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h3>Последние записи</h3><p>Самые свежие изменения.</p></div><button class="link-button" data-view-link="entries">Все записи <span data-icon="arrow-up-right"></span></button></div>
+              <div id="recentEntries" class="recent-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-entries">
+          <div class="page-heading"><div><span class="section-kicker">ЖУРНАЛ</span><h1>Записи времени</h1><p>Редактируйте задачи, длительность и часы Jira.</p></div><button class="primary-button" id="entryAdd"><span data-icon="plus"></span> Новая запись</button></div>
+          <div class="toolbar panel"><div class="search-wrap"><span data-icon="search"></span><input id="entrySearch" class="search-input" placeholder="Поиск по задаче, категории или комментарию…"></div><div class="toolbar-meta" id="entryCount">0 записей</div></div>
+          <section class="panel table-panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>Дата</th><th>Задача</th><th>Категория</th><th>Время</th><th>Jira</th><th>Комментарий</th><th></th></tr></thead><tbody id="entriesBody"></tbody></table></div><div id="entriesEmpty" class="empty-state hidden"></div></section>
+        </section>
+
+        <section class="view" id="view-calendar">
+          <div class="page-heading"><div><span class="section-kicker">МЕСЯЦ</span><h1>Календарь</h1><p>Нагрузка по дням и статусы отсутствий.</p></div><div class="calendar-nav"><button class="icon-button" id="calendarPrev"><span data-icon="chevron-left"></span></button><strong id="calendarTitle">—</strong><button class="icon-button" id="calendarNext"><span data-icon="chevron-right"></span></button></div></div>
+          <div class="calendar-shell">
+            <section class="panel calendar-panel"><div class="calendar-grid" id="calendarGrid"></div></section>
+            <aside class="panel day-panel"><div class="panel-head"><div><span class="section-kicker">ВЫБРАННЫЙ ДЕНЬ</span><h3 id="selectedDayTitle">Выберите дату</h3></div></div><div id="selectedDayContent"></div></aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-templates">
+          <div class="page-heading"><div><span class="section-kicker">SHORTCUTS</span><h1>Быстрые задачи</h1><p>Нажмите на шаблон, чтобы сразу открыть заполненную запись.</p></div><button class="primary-button" id="templateAdd"><span data-icon="plus"></span> Новый шаблон</button></div>
+          <div id="templatesGrid" class="template-grid"></div>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="page-heading"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Норма, рабочая неделя, Google Sheets и резервные копии.</p></div></div>
+          <div class="settings-grid">
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Рабочий график</h3><p>Эти параметры используются для расчёта месячной нормы.</p></div></div><div class="form-grid"><label class="field-label">Дневная норма<input id="settingsNorm" class="field" type="number" min="0" max="24" step="0.25"></label><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label></div><div class="field-label">Рабочие дни<div id="workdaysPicker" class="workdays-picker"></div></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">—</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><label class="field-label">OAuth Client ID<input id="googleClientId" class="field" placeholder="...apps.googleusercontent.com"></label><label class="field-label">ID таблицы <span class="optional">необязательно</span><input id="spreadsheetIdInput" class="field" placeholder="Оставьте пустым для автоматического поиска"></label><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Выйти</button></div></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Резервные копии</h3><p>JSON сохраняется локально и может быть продублирован в Google Drive.</p></div></div><div class="button-row"><button class="secondary-button" id="backupCreate"><span data-icon="download"></span> Сделать backup</button><button class="secondary-button" id="backupRestore"><span data-icon="upload"></span> Восстановить</button></div><input type="file" id="restoreInput" accept="application/json,.json" class="hidden"><div id="backupList" class="backup-list"></div></section>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <nav class="mobile-nav" aria-label="Нижняя навигация">
+      <button class="mobile-nav-item active" data-view="dashboard"><span data-icon="grid"></span><small>Обзор</small></button>
+      <button class="mobile-nav-item" data-view="entries"><span data-icon="clock"></span><small>Записи</small></button>
+      <button class="mobile-nav-item" data-view="calendar"><span data-icon="calendar"></span><small>Календарь</small></button>
+      <button class="mobile-nav-item" data-view="templates"><span data-icon="zap"></span><small>Задачи</small></button>
+      <button class="mobile-nav-item" data-view="settings"><span data-icon="sliders"></span><small>Ещё</small></button>
+    </nav>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root"></div>
+  <div id="blockingLoader" class="blocking-loader"><div class="loader-card"><div class="loader-orb"><span data-icon="cloud"></span></div><strong id="loaderTitle">Подготавливаем Work Time</strong><p id="loaderText">Загрузка интерфейса…</p></div></div>
+
+  <script src="./app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+  </script>
+</body>
+</html>
