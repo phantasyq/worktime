@@ -75,6 +75,7 @@
   const pendingSettings = JSON.parse(localStorage.getItem('workTime.pendingSettings') || 'null');
   const state = {
     view: 'dashboard',
+    mode: 'auth',
     month: localMonth(),
     selectedDate: localDate(),
     spreadsheetId: localStorage.getItem('workTime.spreadsheetId') || '',
@@ -170,8 +171,10 @@
   function monthDays(month) { return Array.from({length:daysInMonth(month)},(_,i)=>`${month}-${String(i+1).padStart(2,'0')}`); }
   function monthlyTotals() {
     const days = monthDays(state.month);
-    const logged = state.records.reduce((a,r)=>a+(Number(r.minutes)||0),0);
-    const jira = state.records.reduce((a,r)=>a+(Number(r.jiraMinutes)||0),0);
+    const prefix = `${state.month}-`;
+    const monthRecords = state.records.filter(r => String(r.date || '').startsWith(prefix));
+    const logged = monthRecords.reduce((a,r)=>a+(Number(r.minutes)||0),0);
+    const jira = monthRecords.reduce((a,r)=>a+(Number(r.jiraMinutes)||0),0);
     const norm = days.reduce((a,d)=>a+minutesForDay(d),0);
     return {logged,jira,norm,balance:logged-norm};
   }
@@ -228,7 +231,7 @@
     $('#entryAdd').addEventListener('click',()=>openRecordModal(null,state.selectedDate));
     $('#templateAdd').addEventListener('click',()=>openTemplateModal());
     $('#refreshButton').addEventListener('click',()=>loadData(true));
-    $('#mobileSync').addEventListener('click',()=>connectGoogle(true));
+    $('#mobileSync').addEventListener('click',()=>state.mode==='google'?switchView('settings'):connectGoogle(true));
     $('#syncCard').addEventListener('click',()=>switchView('settings'));
     $('#accountButton').addEventListener('click',()=>switchView('settings'));
     $('#monthPicker').addEventListener('change',()=>setMonth($('#monthPicker').value));
@@ -237,7 +240,9 @@
     $('#entrySearch').addEventListener('input',renderEntries);
     $('#settingsSave').addEventListener('click',saveSettingsUi);
     $('#googleConnect').addEventListener('click',()=>connectGoogle(true));
+    $('#authConnect').addEventListener('click',()=>connectGoogle(true));
     $('#googleDisconnect').addEventListener('click',disconnectGoogle);
+    $('#modeGoogleButton').addEventListener('click',()=>state.mode==='google'?switchView('settings'):connectGoogle(true));
     $('#backupCreate').addEventListener('click',createBackup);
     $('#backupRestore').addEventListener('click',()=>$('#restoreInput').click());
     $('#restoreInput').addEventListener('change',restoreLocalBackup);
@@ -256,20 +261,24 @@
   }
 
   class GoogleClient {
+    constructor(){
+      this.appDataConfigName='.work-time-config.json';
+    }
     async waitForGis() {
-      const deadline = Date.now()+10000;
+      const deadline = Date.now()+15000;
       while (!window.google?.accounts?.oauth2) {
-        if (Date.now()>deadline) throw new Error('Не удалось загрузить Google Identity Services. Проверьте соединение с accounts.google.com.');
+        if (Date.now()>deadline) throw new Error('Не удалось загрузить Google Sign-In. Проверьте интернет и отключение блокировщика scripts.googleapis.com/accounts.google.com.');
         await new Promise(r=>setTimeout(r,100));
       }
     }
     async init() {
       const clientId = config().googleClientId?.trim();
-      if (!clientId) throw new Error('Добавьте OAuth Client ID в настройках.');
+      if (!clientId) throw new Error('Приложение ещё не настроено владельцем: OAuth Client ID не указан в config.js.');
       await this.waitForGis();
       state.tokenClient = window.google.accounts.oauth2.initTokenClient({
         client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+        // Only non-sensitive, per-file scopes. This avoids broad Drive/Sheets access.
+        scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata',
         callback: () => {}
       });
     }
@@ -293,23 +302,47 @@
       if (response.status===401 && retry) { state.token = null; await this.ensureToken(true); return this.request(url,opts,false); }
       if (!response.ok) {
         let message = `Google API: HTTP ${response.status}`;
-        try { const j = await response.json(); message = j.error?.message || message; } catch {}
+        try { const j = await response.json(); message = j.error?.message || j.error?.status || message; } catch {}
         throw new Error(message);
       }
       return response;
     }
     async json(url, options={}) { const r = await this.request(url, options); return r.status===204?null:r.json(); }
-    async about() { return this.json(`${BASE.drive}/about?fields=user(displayName,emailAddress,photoLink)`); }
-    async findSpreadsheet(title) {
-      const q = [`name = '${title.replace(/'/g,"\\'")}'`,`mimeType = 'application/vnd.google-apps.spreadsheet'`,'trashed = false'].join(' and ');
-      const params = new URLSearchParams({q,spaces:'drive',pageSize:'20',orderBy:'modifiedTime desc',fields:'files(id,name,modifiedTime,webViewLink)'});
-      const result = await this.json(`${BASE.drive}/files?${params}`);
-      return result.files?.[0] || null;
+    async appDataFile() {
+      const params = new URLSearchParams({
+        q: `name = '${this.appDataConfigName.replace(/'/g,"\\'")}' and trashed = false`,
+        spaces:'appDataFolder',
+        pageSize:'10',
+        orderBy:'modifiedTime desc',
+        fields:'files(id,name,modifiedTime)'
+      });
+      const result=await this.json(`${BASE.drive}/files?${params}`);
+      return result.files?.[0]||null;
+    }
+    async readAppDataConfig() {
+      const file=await this.appDataFile();
+      if(!file)return null;
+      const text=await this.readDriveFile(file.id);
+      try{return JSON.parse(text);}catch{return null;}
+    }
+    async saveAppDataConfig(payload) {
+      const text=JSON.stringify(payload);
+      const existing=await this.appDataFile();
+      const metadata={name:this.appDataConfigName,mimeType:'application/json',...(existing?{}:{parents:['appDataFolder']})};
+      return this.uploadJson(this.appDataConfigName,text,{existingId:existing?.id,metadata});
     }
     async createSpreadsheet(title) {
-      const body = {properties:{title},sheets:Object.values(SHEET_NAMES).map(name=>({properties:{title:name}}))};
-      const sheet = await this.json(`${BASE.sheets}/spreadsheets`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      return sheet;
+      // Create the Sheet through Drive API, which works with the recommended drive.file scope.
+      const body={name:title,mimeType:'application/vnd.google-apps.spreadsheet'};
+      const sheetFile=await this.json(`${BASE.drive}/files`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(!sheetFile?.id) throw new Error('Google не вернул ID новой таблицы.');
+      const meta=await this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(sheetFile.id)}?fields=sheets.properties`);
+      const first=meta?.sheets?.[0]?.properties;
+      const requests=[];
+      if(first?.sheetId!=null) requests.push({updateSheetProperties:{properties:{sheetId:first.sheetId,title:SHEET_NAMES.records},fields:'title'}});
+      for(const name of Object.values(SHEET_NAMES).slice(1)) requests.push({addSheet:{properties:{title:name}}});
+      if(requests.length) await this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(sheetFile.id)}:batchUpdate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({requests})});
+      return {spreadsheetId:sheetFile.id};
     }
     async readRange(id, range) {
       const encoded = encodeURIComponent(range);
@@ -342,33 +375,38 @@
       const r = await this.request(`${BASE.drive}/files/${encodeURIComponent(id)}?alt=media`);
       return r.text();
     }
-    async uploadJson(name,text) {
-      const metadata = new Blob([JSON.stringify({name,mimeType:'application/json'})],{type:'application/json'});
+    async uploadJson(name,text,opts={}) {
+      const meta={name,mimeType:'application/json',...(opts.metadata||{})};
+      const metadata = new Blob([JSON.stringify(meta)],{type:'application/json'});
       const content = new Blob([text],{type:'application/json'});
       const form = new FormData(); form.append('metadata',metadata); form.append('file',content,name);
-      return this.json(`${BASE.upload}/files?uploadType=multipart&fields=id,name,webViewLink,createdTime`,{method:'POST',body:form});
+      const path=opts.existingId?`${BASE.upload}/files/${encodeURIComponent(opts.existingId)}?uploadType=multipart&fields=id,name,webViewLink,createdTime`: `${BASE.upload}/files?uploadType=multipart&fields=id,name,webViewLink,createdTime`;
+      return this.json(path,{method:opts.existingId?'PATCH':'POST',body:form});
     }
   }
   const googleClient = new GoogleClient();
 
   class DataStore {
     async ensureSpreadsheet() {
-      let id = state.spreadsheetId || config().spreadsheetId || '';
-      let file = null;
+      let id = state.spreadsheetId || '';
+      if (!id) {
+        const cfg=await googleClient.readAppDataConfig();
+        id=cfg?.spreadsheetId||'';
+      }
       if (id) {
-        try { await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:I1`); } catch { id=''; }
+        try { await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:I1`); }
+        catch { id=''; }
       }
       if (!id) {
-        file = await googleClient.findSpreadsheet(config().spreadsheetTitle || 'Work Time Tracker — Data');
-        if (file) id=file.id;
-      }
-      if (!id) {
-        file = await googleClient.createSpreadsheet(config().spreadsheetTitle || 'Work Time Tracker — Data');
-        id=file.spreadsheetId; // spreadsheets.create uses spreadsheetId
+        const file = await googleClient.createSpreadsheet(config().spreadsheetTitle || 'Work Time Tracker — Data');
+        id=file.spreadsheetId;
         await this.seedSpreadsheet(id);
+        await googleClient.saveAppDataConfig({version:1,spreadsheetId:id,updatedAt:new Date().toISOString()});
+      } else if (id !== state.spreadsheetId) {
+        state.spreadsheetId=id;
       }
-      state.spreadsheetId = id; localStorage.setItem('workTime.spreadsheetId',id);
-      setConfig({spreadsheetId:id});
+      state.spreadsheetId=id;
+      localStorage.setItem('workTime.spreadsheetId',id);
       return id;
     }
     async seedSpreadsheet(id) {
@@ -400,6 +438,7 @@
       state.templates = rowsToObjects(HEADERS.templates,templateRows).map(x=>({...x,minutes:Number(x.minutes)||60}));
       if (!state.templates.length) { state.templates = DEFAULT_TEMPLATES.map(([name,category,minutes,note])=>({id:uid(),name,category,minutes,note})); await this.writeTemplates(); }
       state.connected=true;
+      await googleClient.saveAppDataConfig({version:1,spreadsheetId:id,updatedAt:new Date().toISOString()});
       return state;
     }
     async writeRecords() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.records,HEADERS.records,state.records.map(r=>HEADERS.records.map(k=>r[k]??''))); }
@@ -425,7 +464,7 @@
     async deleteDay(date) { state.days=state.days.filter(x=>x.date!==date); await this.writeDays(); }
     async saveTemplate(t) {
       const row={...t,id:t.id||uid(),minutes:Number(t.minutes)||60,note:t.note||''}; if(!row.name.trim()) throw new Error('Укажите название задачи.');
-      const idx=state.templates.findIndex(x=>x.id===row.id); if(idx>=0) state.templates[idx]=row; else state.templates.push(row); await this.writeTemplates(); return row;
+      const idx=state.templates.findIndex(x=>x.id===row.id); if(idx>=0)state.templates[idx]=row;else state.templates.push(row);await this.writeTemplates();return row;
     }
     async deleteTemplate(id) { state.templates=state.templates.filter(x=>x.id!==id); await this.writeTemplates(); }
     async saveSettings(settings) { state.settings={...state.settings,...settings}; await this.writeSettings(); }
@@ -435,10 +474,12 @@
       state.records=Array.isArray(payload.records)?payload.records:[]; state.days=Array.isArray(payload.days)?payload.days:[]; state.templates=Array.isArray(payload.templates)?payload.templates:[]; state.settings=parseSettings((payload.settings||[]).map(x=>[x.key,x.value]));
       if(!state.settings.dailyNormMinutes) state.settings.dailyNormMinutes=480;
       if(!Array.isArray(state.settings.workdays)) state.settings.workdays=[1,2,3,4,5];
+      if(!state.templates.length)state.templates=DEFAULT_TEMPLATES.map(([name,category,minutes,note])=>({id:uid(),name,category,minutes,note}));
       await Promise.all([this.writeRecords(),this.writeDays(),this.writeSettings(),this.writeTemplates()]);
     }
   }
-  const store = new DataStore();
+  const googleStore = new DataStore();
+  let store = googleStore;
 
   function rowsToObjects(headers, rows) {
     if(!rows || rows.length<2) return [];
@@ -450,44 +491,60 @@
   }
   function columnName(n) { let s=''; while(n>0){let r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}return s; }
 
-  async function connectGoogle(interactive=false) {
+  function showAuthGate(show=true, message='') {
+    $('#authGate').classList.toggle('hidden',!show);
+    const err=$('#authError');
+    if (err) { err.textContent=message||''; err.classList.toggle('show',!!message); }
+    if(show) setTimeout(()=>setIcons($('#authGate')),0);
+  }
+
+  async function connectGoogle(interactive=true) {
+    const btn=$('#authConnect');
     try {
-      if (!config().googleClientId) { openSettingsSetup(); return; }
-      setLoader('Подключаем Google','Открываем безопасное окно доступа…');
+      if (!config().googleClientId) throw new Error('Приложение ещё не настроено владельцем. Нужен OAuth Client ID в config.js.');
+      if(btn){btn.disabled=true;btn.innerHTML='<span data-icon="cloud"></span> Подключаем…';setIcons(btn);}
+      setLoader('Подключаем Google','Открываем безопасный доступ к вашей рабочей таблице…');
       await googleClient.authorize(interactive);
-      state.profile = await googleClient.about();
+      state.mode='google';
+      store=googleStore;
       state.connected=true;
-      renderConnection();
       await loadData(false);
-      setLoader('Work Time готов','Данные синхронизированы',true);
-      toast('Google подключён');
-    } catch (e) {
-      state.connected=false;
-      setLoader('Нужна настройка',e.message,true);
+      localStorage.setItem('workTime.preferGoogle','1');
+      showAuthGate(false);
       renderConnection();
-      toast(e.message,true);
+      setLoader('Work Time готов','Данные синхронизированы',true);
+      toast('Google подключён и данные синхронизированы');
+    } catch (e) {
+      state.mode='auth'; store=googleStore; state.connected=false;
+      showAuthGate(true,e.message || 'Не удалось подключить Google.');
+      renderConnection();
+      setLoader('Нужен вход Google','Нажмите «Войти через Google», чтобы продолжить.',true);
+      toast(`Google: ${e.message}`,true);
+    } finally {
+      if(btn){btn.disabled=false;btn.innerHTML='<span data-icon="log-in"></span> Войти через Google';setIcons(btn);}
     }
   }
-  function disconnectGoogle() {
-    state.token=null; state.connected=false; localStorage.removeItem('workTime.spreadsheetId'); state.spreadsheetId=''; renderConnection(); toast('Локальная сессия Google отключена');
-  }
-  function openSettingsSetup() {
-    switchView('settings'); setTimeout(()=>$('#googleClientId')?.focus(),80);
-    toast('Введите OAuth Client ID, сохраните и подключите Google.',false);
+  async function disconnectGoogle() {
+    try { if(state.token && window.google?.accounts?.oauth2?.revoke){ await new Promise(resolve=>window.google.accounts.oauth2.revoke(state.token,resolve)); } } catch {}
+    state.token=null; state.tokenClient=null; state.connected=false; state.mode='auth'; store=googleStore;
+    localStorage.removeItem('workTime.spreadsheetId'); localStorage.removeItem('workTime.preferGoogle');
+    state.spreadsheetId=''; showAuthGate(true,'Google отключён на этом устройстве. Чтобы продолжить работу, войдите снова.'); renderConnection();
   }
 
   async function loadData(showToast=false) {
     if (state.busy) return; state.busy=true;
     try {
-      if (!config().googleClientId) { renderAll(); return; }
+      if (state.mode!=='google') return;
       if (!state.token) await googleClient.authorize(false);
-      state.profile = state.profile || await googleClient.about();
       await store.load();
       syncSettingsToUi(); renderAll(); renderConnection();
+      showAuthGate(false);
       if (showToast) toast('Данные обновлены');
     } catch(e) {
-      if (showToast) toast(e.message,true);
-      else { renderConnection(); toast(e.message,true); }
+      state.connected=false; state.mode='auth';
+      showAuthGate(true,e.message||'Не удалось загрузить данные.');
+      renderConnection();
+      toast(e.message,true);
     } finally { state.busy=false; }
   }
 
@@ -500,14 +557,25 @@
     renderDashboard(); renderEntries(); renderCalendar(); renderTemplates(); renderSettings(); updateTimerUi(); setIcons();
   }
   function renderConnection() {
-    const connected=state.connected && !!state.spreadsheetId;
-    $('#syncTitle').textContent=connected?'Google Sheets подключён':'Подключить Google';
-    $('#syncSubtitle').textContent=connected?'Онлайн-синхронизация включена':'Синхронизация не настроена';
-    $('#sheetsBadge').textContent=connected?'Подключено':'Не подключено'; $('#sheetsBadge').classList.toggle('on',connected);
-    const sheetLink=connected?`<a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(state.spreadsheetId)}/edit" target="_blank" rel="noopener">Открыть таблицу</a>`:'Таблица будет создана автоматически.';
+    const connected=state.mode==='google' && state.connected && !!state.spreadsheetId;
+    $('#syncTitle').textContent=connected?'Google Sheets подключён':'Войти через Google';
+    $('#syncSubtitle').textContent=connected?'Онлайн-синхронизация включена':'Синхронизация обязательна для работы';
+    $('#sheetsBadge').textContent=connected?'Подключено':'Не подключено';
+    $('#sheetsBadge').classList.toggle('on',connected);
+    $('#sheetsBadge').classList.toggle('demo',!connected);
+    const sheetLink=connected?`<a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(state.spreadsheetId)}/edit" target="_blank" rel="noopener">Открыть таблицу</a>`:'Подключение к Google ещё не выполнено.';
     $('#sheetsStatus').innerHTML=sheetLink;
-    const profileName=state.profile?.user?.displayName || state.profile?.user?.emailAddress || '';
-    $('#avatarLetter').textContent=profileName ? profileName.trim()[0].toUpperCase() : 'G';
+    $('#avatarLetter').textContent=connected?'G':'•';
+    const banner=$('#modeBanner');
+    banner.classList.toggle('google-mode',connected);
+    $('#modeBannerTitle').textContent=connected?'Google синхронизация включена':'Подключите Google, чтобы начать';
+    $('#modeBannerText').textContent=connected?'Данные сохраняются онлайн и доступны на всех устройствах с вашим Google-аккаунтом.':'Один вход через Google — и приложение автоматически создаст и запомнит вашу рабочую таблицу.';
+    $('#modeGoogleButton').textContent=connected?'Настройки Google':'Войти через Google';
+    $('#modeGoogleButton').innerHTML=`<span data-icon="${connected?'cloud':'log-in'}"></span> ${connected?'Настройки Google':'Войти через Google'}`;
+    setIcons(banner);
+    $('#googleConnect').textContent=connected?'Синхронизация активна':'Войти через Google';
+    $('#googleConnect').innerHTML=`<span data-icon="${connected?'cloud':'log-in'}"></span> ${connected?'Синхронизация активна':'Войти через Google'}`;
+    $('#googleConnect').disabled=connected;
   }
 
   function renderDashboard() {
@@ -603,8 +671,6 @@
   function renderSettings() {
     $('#settingsNorm').value=(Number(state.settings.dailyNormMinutes)||480)/60;
     $('#settingsAppName').value=state.settings.appName||'Work Time';
-    $('#googleClientId').value=config().googleClientId||'';
-    $('#spreadsheetIdInput').value=state.spreadsheetId||config().spreadsheetId||'';
     $('#workdaysPicker').innerHTML=[['Пн',1],['Вт',2],['Ср',3],['Чт',4],['Пт',5],['Сб',6],['Вс',7]].map(([label,n])=>`<button type="button" class="workday-chip ${state.settings.workdays.includes(n)?'active':''}" data-workday="${n}">${label}</button>`).join('');
     $$('#workdaysPicker .workday-chip').forEach(btn=>btn.addEventListener('click',()=>{btn.classList.toggle('active');}));
     renderBackups();
@@ -612,43 +678,70 @@
   function syncSettingsToUi() { if($('#settingsNorm')) renderSettings(); }
   async function saveSettingsUi() {
     try {
+      if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
       const norm=Math.round(parseFloat($('#settingsNorm').value.replace(',','.'))*60);
       if(!Number.isFinite(norm)||norm<0||norm>1440) throw new Error('Дневная норма должна быть от 0 до 24 часов.');
       const workdays=$$('#workdaysPicker .workday-chip.active').map(x=>Number(x.dataset.workday));
       const appName=$('#settingsAppName').value.trim()||'Work Time';
-      const googleClientId=$('#googleClientId').value.trim(); const spreadsheetId=$('#spreadsheetIdInput').value.trim();
-      setConfig({googleClientId,spreadsheetId}); state.spreadsheetId=spreadsheetId; state.settings={...state.settings,dailyNormMinutes:norm,workdays,appName};
-      localStorage.setItem('workTime.pendingSettings',JSON.stringify(state.settings));
-      if(state.connected) await store.saveSettings({dailyNormMinutes:norm,workdays,appName});
-      renderAll(); renderConnection(); toast(state.connected?'Настройки сохранены в Google Sheets':'Настройки сохранены на этом устройстве. Подключите Google для синхронизации.');
+      state.settings={...state.settings,dailyNormMinutes:norm,workdays,appName};
+      await store.saveSettings({dailyNormMinutes:norm,workdays,appName});
+      renderAll(); renderConnection(); toast('Настройки сохранены в Google Sheets.');
     } catch(e) { toast(e.message,true); }
   }
 
   async function createBackup() {
     try {
-      if(!state.connected) { await connectGoogle(true); if(!state.connected)return; }
       const text=store.backupPayload(); const stamp=new Date().toISOString().replace(/[:.]/g,'-'); const name=`work-time-backup_${stamp}.json`;
       downloadBlob(new Blob([text],{type:'application/json'}),name);
-      const file=await googleClient.uploadJson(name,text); await renderBackups(); toast('Backup сохранён локально и в Google Drive');
-      return file;
+      localStorage.setItem('workTime.lastBackupAt',new Date().toISOString());
+      if(state.mode==='google' && state.connected){
+        await googleClient.uploadJson(name,text); await renderBackups(); toast('Backup сохранён на устройство и в Google Drive');
+      } else {
+        toast('Backup скачан на устройство.');
+      }
     } catch(e) { toast(e.message,true); }
   }
   async function renderBackups() {
-    if(!state.connected){$('#backupList').innerHTML='<div class="empty-state">Подключите Google, чтобы видеть резервные копии.</div>';return;}
+    if(state.mode!=='google' || !state.connected){
+      $('#backupList').innerHTML='<div class="empty-state">Войдите через Google, чтобы использовать резервные копии.</div>';
+      return;
+    }
     try { const files=await googleClient.listBackups(); $('#backupList').innerHTML=files.length?files.map(f=>`<div class="backup-item"><div class="backup-copy"><strong>${escapeHtml(f.name)}</strong><span>${formatDate(f.createdTime?.slice(0,10)||localDate(),{day:'2-digit',month:'short',year:'numeric'})}</span></div><button class="row-action" data-drive-restore="${f.id}" aria-label="Восстановить"><span data-icon="upload"></span></button></div>`).join(''):'<div class="empty-state">В Drive пока нет backup-файлов.</div>'; setIcons($('#backupList')); $$('#backupList [data-drive-restore]').forEach(btn=>btn.addEventListener('click',()=>restoreDriveBackup(btn.dataset.driveRestore))); }
     catch(e){ $('#backupList').innerHTML=`<div class="empty-state">Не удалось загрузить список backup: ${escapeHtml(e.message)}</div>`; }
   }
   async function restoreDriveBackup(id) {
     if(!confirm('Восстановить эту резервную копию? Текущие данные будут заменены.')) return;
     try { const text=await googleClient.readDriveFile(id); await createSafetyBackup(); await store.restore(JSON.parse(text)); toast('Данные восстановлены из Google Drive'); renderAll(); } catch(e){toast(e.message,true);} }
-  async function createSafetyBackup() { try { const text=store.backupPayload(); const name=`work-time-safety_${new Date().toISOString().replace(/[:.]/g,'-')}.json`; await googleClient.uploadJson(name,text); } catch {} }
+  async function createSafetyBackup() {
+    try {
+      const text=store.backupPayload();
+      if(state.mode==='google' && state.connected){ const name=`work-time-safety_${new Date().toISOString().replace(/[:.]/g,'-')}.json`; await googleClient.uploadJson(name,text); }
+      else localStorage.setItem('workTime.safetyBackup',text);
+    } catch {}
+  }
   async function restoreLocalBackup(e) {
     const file=e.target.files?.[0]; e.target.value=''; if(!file)return;
     if(!confirm('Восстановить эту копию? Перед восстановлением будет создана страховочная копия текущих данных.'))return;
     try { const text=await file.text(); await createSafetyBackup(); await store.restore(JSON.parse(text)); toast('Данные восстановлены'); renderAll(); } catch(err){toast(err.message,true);} }
 
   async function exportExcel() {
-    try { const blob=await googleClient.exportXlsx(state.spreadsheetId); downloadBlob(blob,`work-time_${state.month}.xlsx`); toast('Excel-файл скачан'); } catch(e){toast(e.message,true);} }
+    try {
+      if(state.mode==='google' && state.connected){
+        const blob=await googleClient.exportXlsx(state.spreadsheetId); downloadBlob(blob,`work-time_${state.month}.xlsx`); toast('Excel-файл скачан'); return;
+      }
+      if(state.mode!=='google' || !state.connected) throw new Error('Сначала войдите через Google.');
+      if(!window.XLSX) throw new Error('Модуль Excel ещё не загрузился. Обновите страницу и повторите.');
+      const wb=XLSX.utils.book_new();
+      const recordRows=[HEADERS.records,...state.records.map(r=>HEADERS.records.map(k=>r[k]??''))];
+      const dayRows=[HEADERS.days,...state.days.map(r=>HEADERS.days.map(k=>r[k]??''))];
+      const settingRows=[HEADERS.settings,['dailyNormMinutes',state.settings.dailyNormMinutes],['workdays',state.settings.workdays.join(',')],['appName',state.settings.appName],['currency','hours']];
+      const templateRows=[HEADERS.templates,...state.templates.map(r=>HEADERS.templates.map(k=>r[k]??''))];
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(recordRows),'Records');
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(dayRows),'Days');
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(settingRows),'Settings');
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(templateRows),'TaskTemplates');
+      XLSX.writeFile(wb,`work-time_${state.month}.xlsx`); toast('Excel-файл скачан');
+    } catch(e){toast(e.message,true);} }
 
   function openRecordModal(record=null,date=state.selectedDate,template=null) {
     const r=record||{date,task:template?.name||'',category:template?.category||'',minutes:template?.minutes||60,jiraMinutes:0,note:template?.note||''};
@@ -683,16 +776,9 @@
     if(!state.timer.running){state.timer.running=true;state.timer.startedAt=Date.now();$('#timerTemplate').disabled=true;updateTimerUi();return;}
     state.timer.elapsed += Date.now()-state.timer.startedAt; state.timer.running=false; $('#timerTemplate').disabled=false; const minutes=Math.max(1,Math.round(state.timer.elapsed/60000)); const tid=$('#timerTemplate').value; const temp=state.templates.find(x=>x.id===tid); state.timer={running:false,startedAt:0,elapsed:0}; updateTimerUi(); openRecordModal(null,state.selectedDate,temp?{...temp,minutes}:null); setTimeout(()=>{$('#recordMinutes').value=durationInput(minutes);},30);
   }
-  function resetTimer(){state.timer={running:false,startedAt:0,elapsed:0};$('#timerTemplate').disabled=false;updateTimerUi();}
+  function resetTimer(){state.timer={running:false,startedAt:0,elapsed:0};localStorage.removeItem('workTime.timer');$('#timerTemplate').disabled=false;updateTimerUi();}
   function initTimer() { const saved=JSON.parse(localStorage.getItem('workTime.timer')||'null'); if(saved?.running&&saved.startedAt){state.timer=saved;} setInterval(()=>{if(state.timer.running)localStorage.setItem('workTime.timer',JSON.stringify(state.timer));},1000); $('#timerButton').addEventListener('click',toggleTimer); $('#timerReset').addEventListener('click',resetTimer); $('#timerTemplate').addEventListener('change',e=>localStorage.setItem('workTime.timerTemplate',e.target.value)); const t=localStorage.getItem('workTime.timerTemplate');if(t)$('#timerTemplate').value=t; }
   function syncTemplateSelect(){ $('#timerTemplate').innerHTML='<option value="">Выберите задачу</option>'+state.templates.map(t=>`<option value="${t.id}">${escapeHtml(t.name)}</option>`).join(''); const saved=localStorage.getItem('workTime.timerTemplate');if(saved)$('#timerTemplate').value=saved; }
-
-  function openConfigModal() {
-    const c=config();
-    openModal(`<div style="background:#f7f7ff;border:1px solid #eceaff;padding:13px 14px;border-radius:14px;font-size:11px;color:#707789;line-height:1.5">OAuth Client ID — публичный идентификатор веб-приложения. Client Secret для этого варианта не нужен.</div><label class="field-label">Google OAuth Client ID<input id="setupClientId" class="field" value="${escapeAttr(c.googleClientId||'')}" placeholder="1234567890-abc.apps.googleusercontent.com"></label><p style="font-size:10px;color:#9ca3b2;line-height:1.5">После сохранения откроется авторизация Google. Для GitHub Pages в Google Cloud Console нужно добавить адрес сайта в Authorized JavaScript origins.</p><div class="modal-actions"><button class="primary-button" id="setupSave">Сохранить и продолжить</button></div>`, 'Подключение Google');
-    $('#setupSave').addEventListener('click',async()=>{const id=$('#setupClientId').value.trim();if(!id){toast('Укажите Client ID.',true);return;}setConfig({googleClientId:id});closeModal();await connectGoogle(true);});
-  }
-  function openSettingsSetupLegacy(){openConfigModal();}
 
   function plural(n,a,b,c){const n1=Math.abs(n)%10,n2=Math.abs(n)%100;return n1===1&&n2!==11?a:n1>=2&&n1<=4&&(n2<10||n2>=20)?b:c;}
   function downloadBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),500);}
@@ -702,16 +788,15 @@
     $('#monthPicker').value=state.month;
     $('#pageDate').textContent=new Intl.DateTimeFormat('ru-RU',{weekday:'long',day:'numeric',month:'long'}).format(new Date());
     $('#brandTitle').textContent=config().appTitle||'Work Time';$('#mobileTitle').textContent=config().appTitle||'Work Time';document.title=config().appTitle||'Work Time';
-    // Template selector icon data: square is added dynamically if timer runs.
+    state.mode='auth'; state.connected=false; store=googleStore;
+    renderAll(); renderConnection();
+    showAuthGate(true);
     if(!config().googleClientId){
-      setLoader('Подключите Google','Добавьте OAuth Client ID — данные будут синхронизироваться с Google Sheets.',true);
-      renderAll(); renderConnection(); openConfigModal(); return;
+      showAuthGate(true,'Владелец приложения ещё не указал OAuth Client ID в config.js.');
+      setLoader('Требуется настройка владельца','Сначала добавьте Client ID в config.js.',true);
+    } else {
+      setLoader('Work Time готов','Нажмите «Войти через Google», чтобы начать.',true);
     }
-    // Try to reuse a previously granted Google session silently. If Google requires
-    // an interactive login, the page stays usable and the user can press Connect.
-    try { await googleClient.authorize(false); await loadData(false); } catch(e) { state.connected=false; renderAll(); renderConnection(); }
-    syncTemplateSelect();
-    setLoader('Work Time готов','Нажмите «Подключить Google», если синхронизация ещё не активна.',true);
     $('#app').classList.remove('is-booting');
   }
 

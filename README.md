@@ -1,66 +1,29 @@
-# Work Time — GitHub Pages + Google Sheets
+# Work Time
 
-Красивое адаптивное приложение для учёта рабочего времени. Фронтенд — обычный статический сайт, который можно разместить на GitHub Pages. Данные синхронизируются напрямую с Google Sheets через Google OAuth и Google Sheets/Drive API.
+Адаптивный web/PWA-трекер рабочего времени для GitHub Pages.
 
 ## Возможности
 
 - учёт времени по задачам;
 - дневная и месячная норма;
-- баланс относительно нормы;
-- отдельный объём времени, списанного в Jira;
+- Jira-время;
 - отпуск, больничный и Day off;
-- календарь рабочего времени;
-- быстрые шаблоны типовых задач;
-- редактирование и удаление записей;
-- встроенный старт/стоп таймер;
-- экспорт всей Google Таблицы в Excel `.xlsx`;
-- локальная JSON-резервная копия;
-- резервная копия в Google Drive;
-- восстановление из локального JSON или из Drive;
-- автоматический поиск созданной таблицы по Google-аккаунту;
-- адаптивный интерфейс для ПК и телефона;
-- PWA-оболочка: сайт можно установить на домашний экран телефона.
+- календарь;
+- быстрые задачи;
+- редактирование и удаление;
+- Excel-экспорт;
+- JSON backup/restore;
+- синхронизация через Google Sheets;
+- автоматически общая таблица на всех устройствах пользователя.
 
-## Как работает синхронизация
+## Архитектура синхронизации
 
-Приложение использует Google Identity Services для получения OAuth-доступа пользователя и напрямую вызывает Google Sheets API. Отдельный сервер для фронтенда не требуется. Google рекомендует использовать OAuth для web-приложений и указывает, что для web-клиента нужен OAuth Client ID; client secret для такого клиентского приложения не используется. citeturn983700search0turn983700search1
+GitHub Pages → Google OAuth → Google Drive/Sheets API.
 
-При первом подключении создаётся Google Spreadsheet с листами:
+Приложение использует `drive.file` и `drive.appdata`, а не широкие Drive/Sheets scopes. Личный Spreadsheet ID сохраняется в appData, поэтому пользователю не нужно вручную выбирать таблицу при входе с другого устройства.
 
-- `Records` — записи времени;
-- `Days` — статусы дней;
-- `Settings` — настройки нормы и графика;
-- `TaskTemplates` — быстрые задачи.
+## Для тестировщика
 
-Одна и та же таблица находится через Google Drive, поэтому после входа под тем же Google-аккаунтом приложение можно открыть на другом устройстве.
+Откройте опубликованный GitHub Pages URL и нажмите **Войти через Google**. Тестирование без синхронизации не предусмотрено: это sync-first приложение.
 
-## Шаг 1. Создай Google Cloud project
-
-1. Открой Google Cloud Console.
-2. Создай проект.
-3. Включи **Google Sheets API**. При использовании backup/Excel также нужен доступ к Google Drive API. Google описывает этот сценарий в официальных quickstart и документации Drive. citeturn983700search0turn983700search4
-4. Настрой **Google Auth Platform / OAuth consent screen**.
-5. Создай **OAuth Client ID → Web application**.
-6. В **Authorized JavaScript origins** добавь адрес GitHub Pages, например:
-
-```text
-https://USERNAME.github.io
-```
-
-если приложение лежит в репозитории и открывается как `https://USERNAME.github.io/REPOSITORY/`, origin всё равно остаётся `https://USERNAME.github.io`.
-
-Google прямо указывает, что для web-приложения OAuth Client ID привязывается к Authorized JavaScript origins. citeturn983700search0
-
-### Scope
-
-Приложение запрашивает:
-
-```text
-https://www.googleapis.com/auth/spreadsheets
-https://www.googleapis.com/auth/drive.file
-```
-
-Google рекомендует выбирать максимально узкие scopes, когда это возможно. citeturn983700search2
-
-`spreadsheets` нужен для чтения и изменения табеля, `drive.file` — для созданной приложением таблицы и backup-файлов.
-
+Feedback: GitHub Issues.

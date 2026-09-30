@@ -13,6 +13,7 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="./config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -62,6 +63,12 @@
           <button class="avatar" id="accountButton" aria-label="Аккаунт"><span id="avatarLetter">G</span></button>
         </div>
       </header>
+
+      <div class="mode-banner" id="modeBanner">
+        <div class="mode-banner-icon"><span data-icon="cloud"></span></div>
+        <div class="mode-banner-copy"><strong id="modeBannerTitle">Синхронизация Google не подключена</strong><span id="modeBannerText">Подключите Google, чтобы работать с общей онлайн-базой на ПК и телефоне.</span></div>
+        <div class="mode-banner-actions"><button class="soft-button" id="modeGoogleButton"><span data-icon="log-in"></span> Подключить Google</button><a class="secondary-button" id="feedbackButton" href="https://github.com/phantasyq/worktime/issues/new" target="_blank" rel="noopener"><span>↗</span> Оставить отзыв</a></div>
+      </div>
 
       <div class="view-stack">
         <section class="view active" id="view-dashboard">
@@ -140,8 +147,8 @@
           <div class="page-heading"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Норма, рабочая неделя, Google Sheets и резервные копии.</p></div></div>
           <div class="settings-grid">
             <section class="panel settings-panel"><div class="panel-head"><div><h3>Рабочий график</h3><p>Эти параметры используются для расчёта месячной нормы.</p></div></div><div class="form-grid"><label class="field-label">Дневная норма<input id="settingsNorm" class="field" type="number" min="0" max="24" step="0.25"></label><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label></div><div class="field-label">Рабочие дни<div id="workdaysPicker" class="workdays-picker"></div></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
-            <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">—</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><label class="field-label">OAuth Client ID<input id="googleClientId" class="field" placeholder="...apps.googleusercontent.com"></label><label class="field-label">ID таблицы <span class="optional">необязательно</span><input id="spreadsheetIdInput" class="field" placeholder="Оставьте пустым для автоматического поиска"></label><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Выйти</button></div></section>
-            <section class="panel settings-panel"><div class="panel-head"><div><h3>Резервные копии</h3><p>JSON сохраняется локально и может быть продублирован в Google Drive.</p></div></div><div class="button-row"><button class="secondary-button" id="backupCreate"><span data-icon="download"></span> Сделать backup</button><button class="secondary-button" id="backupRestore"><span data-icon="upload"></span> Восстановить</button></div><input type="file" id="restoreInput" accept="application/json,.json" class="hidden"><div id="backupList" class="backup-list"></div></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">Подключите Google для онлайн-синхронизации.</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><div class="settings-google-connected"><strong>Синхронизация работает через ваш Google-аккаунт.</strong><span>Таблица создаётся автоматически. На другом устройстве приложение найдёт её само — достаточно войти в тот же Google-аккаунт.</span></div><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Отключить на этом устройстве</button></div></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Резервные копии</h3><p>Копия скачивается на устройство и при подключённом Google дублируется в Drive.</p></div></div><div class="button-row"><button class="secondary-button" id="backupCreate"><span data-icon="download"></span> Сделать backup</button><button class="secondary-button" id="backupRestore"><span data-icon="upload"></span> Восстановить</button></div><input type="file" id="restoreInput" accept="application/json,.json" class="hidden"><div id="backupList" class="backup-list"></div></section>
           </div>
         </section>
       </div>
@@ -154,6 +161,22 @@
       <button class="mobile-nav-item" data-view="templates"><span data-icon="zap"></span><small>Задачи</small></button>
       <button class="mobile-nav-item" data-view="settings"><span data-icon="sliders"></span><small>Ещё</small></button>
     </nav>
+  </div>
+
+  <div class="auth-gate" id="authGate">
+    <div class="auth-card">
+      <div class="auth-brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>Work Time</strong><div style="font-size:11px;color:#8991a0">синхронизированный табель</div></div></div>
+      <h2>Войдите через Google</h2>
+      <p>Это единственный шаг перед началом работы. Данные будут храниться онлайн и синхронизироваться между вашим ПК и телефоном.</p>
+      <div class="auth-points">
+        <div class="auth-point"><b>✓</b><span>Личная таблица создаётся автоматически</span></div>
+        <div class="auth-point"><b>✓</b><span>На другом устройстве данные найдутся автоматически</span></div>
+        <div class="auth-point"><b>✓</b><span>Резервные копии можно сохранять в Google Drive</span></div>
+      </div>
+      <div class="auth-actions"><button class="primary-button" id="authConnect"><span data-icon="log-in"></span> Войти через Google</button><a class="secondary-button" href="https://github.com/phantasyq/worktime/issues/new" target="_blank" rel="noopener">↗ Оставить отзыв</a></div>
+      <div class="auth-error" id="authError"></div>
+      <div class="auth-foot">Приложение не получает доступ ко всему Google Drive: оно использует отдельные файлы, которые созданы или используются этим приложением.</div>
+    </div>
   </div>
 
   <div id="modalRoot"></div>
