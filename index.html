@@ -29,7 +29,6 @@
 
       <nav class="nav" aria-label="Навигация">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon" data-icon="grid"></span><span>Обзор</span></button>
-        <button class="nav-item" data-view="entries"><span class="nav-icon" data-icon="clock"></span><span>Записи</span></button>
         <button class="nav-item" data-view="calendar"><span class="nav-icon" data-icon="calendar"></span><span>Календарь</span></button>
         <button class="nav-item" data-view="templates"><span class="nav-icon" data-icon="zap"></span><span>Быстрые задачи</span></button>
         <button class="nav-item" data-view="settings"><span class="nav-icon" data-icon="sliders"></span><span>Настройки</span></button>
@@ -112,28 +111,18 @@
           </div>
           <div class="stats-grid" id="statsGrid"></div>
 
-          <div class="content-grid">
-            <section class="panel wide">
-              <div class="panel-head"><div><h3>По дням</h3><p>Время, норма и Jira за выбранный месяц.</p></div><button class="link-button" data-view-link="calendar">Открыть календарь <span data-icon="arrow-up-right"></span></button></div>
-              <div id="dailyList" class="daily-list"></div>
-            </section>
+          <div class="content-grid overview-recent">
             <section class="panel">
-              <div class="panel-head"><div><h3>Последние записи</h3><p>Самые свежие изменения.</p></div><button class="link-button" data-view-link="entries">Все записи <span data-icon="arrow-up-right"></span></button></div>
+              <div class="panel-head"><div><h3>Последние списания</h3><p>Самые свежие изменения.</p></div><button class="link-button" data-view-link="calendar">Открыть календарь <span data-icon="arrow-up-right"></span></button></div>
               <div id="recentEntries" class="recent-list"></div>
             </section>
           </div>
         </section>
 
-        <section class="view" id="view-entries">
-          <div class="page-heading"><div><span class="section-kicker">ЖУРНАЛ</span><h1>Записи времени</h1><p>Редактируйте задачи, длительность и часы Jira.</p></div><button class="primary-button" id="entryAdd"><span data-icon="plus"></span> Новая запись</button></div>
-          <div class="toolbar panel"><div class="search-wrap"><span data-icon="search"></span><input id="entrySearch" class="search-input" placeholder="Поиск по задаче, категории или комментарию…"></div><div class="toolbar-meta" id="entryCount">0 записей</div></div>
-          <section class="panel table-panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>Дата</th><th>Задача</th><th>Категория</th><th>Время</th><th>Jira</th><th>Комментарий</th><th></th></tr></thead><tbody id="entriesBody"></tbody></table></div><div id="entriesEmpty" class="empty-state hidden"></div></section>
-        </section>
-
         <section class="view" id="view-calendar">
-          <div class="page-heading"><div><span class="section-kicker">МЕСЯЦ</span><h1>Календарь</h1><p>Нагрузка по дням и статусы отсутствий.</p></div><div class="calendar-nav"><button class="icon-button" id="calendarPrev"><span data-icon="chevron-left"></span></button><strong id="calendarTitle">—</strong><button class="icon-button" id="calendarNext"><span data-icon="chevron-right"></span></button></div></div>
+          <div class="page-heading"><div><span class="section-kicker">МЕСЯЦ</span><h1>Календарь списаний</h1><p>Выберите день, чтобы добавить, изменить или удалить списания. Норма рабочего дня — 8 часов.</p></div><div class="calendar-nav"><button class="icon-button" id="calendarPrev"><span data-icon="chevron-left"></span></button><strong id="calendarTitle">—</strong><button class="icon-button" id="calendarNext"><span data-icon="chevron-right"></span></button></div></div>
           <div class="calendar-shell">
-            <section class="panel calendar-panel"><div class="calendar-grid" id="calendarGrid"></div></section>
+            <section class="panel calendar-panel"><div class="calendar-grid" id="calendarGrid"></div><div class="calendar-legend"><span><i class="good"></i> 8:00 — норма</span><span><i class="bad"></i> Меньше 8:00</span><span><i class="warn"></i> Больше 8:00</span><span><i class="off"></i> Выходной / праздник</span></div></section>
             <aside class="panel day-panel"><div class="panel-head"><div><span class="section-kicker">ВЫБРАННЫЙ ДЕНЬ</span><h3 id="selectedDayTitle">Выберите дату</h3></div></div><div id="selectedDayContent"></div></aside>
           </div>
         </section>
@@ -146,7 +135,20 @@
         <section class="view" id="view-settings">
           <div class="page-heading"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Норма, рабочая неделя, Google Sheets и резервные копии.</p></div></div>
           <div class="settings-grid">
-            <section class="panel settings-panel"><div class="panel-head"><div><h3>Рабочий график</h3><p>Эти параметры используются для расчёта месячной нормы.</p></div></div><div class="form-grid"><label class="field-label">Дневная норма<input id="settingsNorm" class="field" type="number" min="0" max="24" step="0.25"></label><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label></div><div class="field-label">Рабочие дни<div id="workdaysPicker" class="workdays-picker"></div></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Рабочий график</h3><p>Каждый рабочий день требует ровно 8 часов списаний. Праздники и выходные исключаются из нормы.</p></div></div><div class="form-grid"><div class="fixed-norm"><span>Норма рабочего дня</span><strong>8:00</strong></div><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label></div><div class="field-label">Рабочие дни<div id="workdaysPicker" class="workdays-picker"></div><p class="form-hint">Суббота и воскресенье всегда заблокированы.</p></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
+            <section class="panel settings-panel">
+              <div class="panel-head"><div><h3>Отпуск, больничный и Day off</h3><p>Добавьте интервал один раз. Каждый рабочий день внутри него автоматически учитывается как 8:00.</p></div></div>
+              <div class="form-grid"><label class="field-label">С даты<input id="absenceStart" class="field" type="date" required></label><label class="field-label">По дату включительно<input id="absenceEnd" class="field" type="date" required></label></div>
+              <div class="form-grid"><label class="field-label">Тип<select id="absenceType" class="field"><option value="vacation">Отпуск</option><option value="sick">Больничный</option><option value="dayoff">Day off</option></select></label><label class="field-label">Комментарий<input id="absenceNote" class="field" placeholder="Необязательно"></label></div>
+              <button class="primary-button" id="absenceAdd"><span data-icon="plus"></span> Добавить интервал</button>
+              <div id="absencePeriodsList" class="setting-list"></div>
+            </section>
+            <section class="panel settings-panel">
+              <div class="panel-head"><div><h3>Праздничные дни</h3><p>Добавленные даты не допускают ручных списаний и не входят в месячную норму.</p></div></div>
+              <div class="form-grid"><label class="field-label">Дата праздника<input id="holidayDate" class="field" type="date" required></label><label class="field-label">Название<input id="holidayName" class="field" placeholder="Например: Новый год"></label></div>
+              <button class="secondary-button" id="holidayAdd"><span data-icon="plus"></span> Добавить праздник</button>
+              <div id="holidaysList" class="setting-list"></div>
+            </section>
             <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">Подключите Google для онлайн-синхронизации.</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><div class="settings-google-connected"><strong>Синхронизация работает через ваш Google-аккаунт.</strong><span>Таблица создаётся автоматически. На другом устройстве приложение найдёт её само — достаточно войти в тот же Google-аккаунт.</span></div><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Отключить на этом устройстве</button></div></section>
             <section class="panel settings-panel"><div class="panel-head"><div><h3>Резервные копии</h3><p>Копия скачивается на устройство и при подключённом Google дублируется в Drive.</p></div></div><div class="button-row"><button class="secondary-button" id="backupCreate"><span data-icon="download"></span> Сделать backup</button><button class="secondary-button" id="backupRestore"><span data-icon="upload"></span> Восстановить</button></div><input type="file" id="restoreInput" accept="application/json,.json" class="hidden"><div id="backupList" class="backup-list"></div></section>
           </div>
@@ -156,7 +158,6 @@
 
     <nav class="mobile-nav" aria-label="Нижняя навигация">
       <button class="mobile-nav-item active" data-view="dashboard"><span data-icon="grid"></span><small>Обзор</small></button>
-      <button class="mobile-nav-item" data-view="entries"><span data-icon="clock"></span><small>Записи</small></button>
       <button class="mobile-nav-item" data-view="calendar"><span data-icon="calendar"></span><small>Календарь</small></button>
       <button class="mobile-nav-item" data-view="templates"><span data-icon="zap"></span><small>Задачи</small></button>
       <button class="mobile-nav-item" data-view="settings"><span data-icon="sliders"></span><small>Ещё</small></button>

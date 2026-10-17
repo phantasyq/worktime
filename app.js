@@ -14,10 +14,10 @@
     templates: 'TaskTemplates'
   };
   const HEADERS = {
-    records: ['id','date','task','category','minutes','jiraMinutes','note','createdAt','updatedAt'],
+    records: ['id','date','task','category','minutes','jira','note','createdAt','updatedAt'],
     days: ['date','status','comment','updatedAt'],
     settings: ['key','value'],
-    templates: ['id','name','category','minutes','note']
+    templates: ['id','name']
   };
   const DEFAULT_SETTINGS = {
     dailyNormMinutes: 480,
@@ -25,13 +25,7 @@
     appName: 'Work Time',
     currency: 'hours'
   };
-  const DEFAULT_TEMPLATES = [
-    ['Разработка','Разработка',60,''],
-    ['Встреча','Встречи',60,''],
-    ['Поддержка','Поддержка',30,''],
-    ['Аналитика','Аналитика',60,''],
-    ['Документация','Документация',45,'']
-  ];
+  const DEFAULT_TEMPLATES = ['Разработка','Встреча','Поддержка','Аналитика','Документация'];
   const STATUS_META = {
     work: { label:'Рабочий', tone:'soft', icon:'briefcase' },
     vacation: { label:'Отпуск', tone:'purple', icon:'sun' },
@@ -85,6 +79,8 @@
     records: [],
     days: [],
     templates: [],
+    periods: [],
+    holidays: [],
     settings: pendingSettings ? {...DEFAULT_SETTINGS,...pendingSettings} : {...DEFAULT_SETTINGS},
     connected: false,
     busy: false,
@@ -150,34 +146,46 @@
   function durationInput(minutes) { return formatHours(minutes); }
   function formatDate(dateString, opts={day:'2-digit',month:'short'}) { return new Intl.DateTimeFormat('ru-RU', opts).format(dateFromIso(dateString)); }
   function monthLong(month) { const [y,m] = month.split('-').map(Number); return new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric'}).format(new Date(y,m-1,1)); }
-  function isPast(date) { return date < localDate(); }
   function isoWeekday(date) { const d = dateFromIso(date).getDay(); return d === 0 ? 7 : d; }
   function isWorkday(date) { return state.settings.workdays.includes(isoWeekday(date)); }
+  function holidayForDay(date) { return state.holidays.find(h => (typeof h === 'string' ? h : h.date) === date) || null; }
+  function isHoliday(date) { return !!holidayForDay(date); }
+  function isBlockedDay(date) { return [6,7].includes(isoWeekday(date)) || !isWorkday(date) || isHoliday(date); }
+  function periodForDay(date) { return state.periods.find(p => p.startDate <= date && date <= p.endDate) || null; }
   function minutesForDay(date) {
-    const status = state.days.find(x => x.date === date)?.status || 'work';
-    if (status !== 'work') return 0;
-    return isWorkday(date) ? Number(state.settings.dailyNormMinutes || 0) : 0;
+    // The business rule is intentionally fixed: every eligible working day counts as 8 hours.
+    return isBlockedDay(date) ? 0 : 480;
   }
   function statusForDay(date) {
-    const explicit = state.days.find(x => x.date === date);
-    if (explicit && explicit.status !== 'work') return {key:explicit.status, ...STATUS_META[explicit.status]};
+    if (isBlockedDay(date)) return null;
+    const p = periodForDay(date);
+    if (p && STATUS_META[p.type]) return {key:p.type, ...STATUS_META[p.type], period:p};
+    // Legacy records are converted to one-day periods during data migration.
+    const legacy = state.days.find(x => x.date === date && x.status !== 'work');
+    if (legacy && STATUS_META[legacy.status]) return {key:legacy.status,...STATUS_META[legacy.status],period:{startDate:date,endDate:date,note:legacy.comment||''}};
     return null;
   }
   function recordsForDay(date) { return state.records.filter(r => r.date === date); }
   function totalsForDay(date) {
-    return recordsForDay(date).reduce((acc,r) => { acc.minutes += Number(r.minutes)||0; acc.jira += Number(r.jiraMinutes)||0; return acc; }, {minutes:0,jira:0});
+    // Weekends/holidays are blocked and excluded. Approved absence intervals count as 8h
+    // against the norm automatically and are not incorrectly treated as Jira tasks.
+    if (isBlockedDay(date)) return {minutes:0,jira:0};
+    if (periodForDay(date)) return {minutes:480,jira:0};
+    return recordsForDay(date).reduce((acc,r) => { const mins=Number(r.minutes)||0; acc.minutes += mins; if (r.jira === true || String(r.jira).toLowerCase()==='true') acc.jira += mins; return acc; }, {minutes:0,jira:0});
   }
   function daysInMonth(month) { const [y,m] = month.split('-').map(Number); return new Date(y,m,0).getDate(); }
   function monthDays(month) { return Array.from({length:daysInMonth(month)},(_,i)=>`${month}-${String(i+1).padStart(2,'0')}`); }
   function monthlyTotals() {
     const days = monthDays(state.month);
-    const prefix = `${state.month}-`;
-    const monthRecords = state.records.filter(r => String(r.date || '').startsWith(prefix));
-    const logged = monthRecords.reduce((a,r)=>a+(Number(r.minutes)||0),0);
-    const jira = monthRecords.reduce((a,r)=>a+(Number(r.jiraMinutes)||0),0);
+    const logged = days.reduce((a,d)=>a+totalsForDay(d).minutes,0);
+    const jira = days.reduce((a,d)=>a+totalsForDay(d).jira,0);
     const norm = days.reduce((a,d)=>a+minutesForDay(d),0);
     return {logged,jira,norm,balance:logged-norm};
   }
+  function isValidWorkDate(date) { return /^\d{4}-\d{2}-\d{2}$/.test(date) && !isBlockedDay(date) && !periodForDay(date); }
+  function blockedDateMessage(date) { if (periodForDay(date) && !isBlockedDay(date)) return 'На период отсутствия списание учтено автоматически как 8:00.'; if (isHoliday(date)) return 'На праздничные дни списание заблокировано.'; if ([6,7].includes(isoWeekday(date))) return 'В выходные дни списание заблокировано.'; if (!isWorkday(date)) return 'Эта дата не входит в ваш рабочий график.'; return 'На эту дату нельзя добавлять списания.'; }
+  function isJiraValue(value) { return value === true || ['true','yes','1','да'].includes(String(value ?? '').trim().toLowerCase()) || (Number(value)>0); }
+  function safeJson(value, fallback) { try { const parsed=JSON.parse(value); return parsed ?? fallback; } catch { return fallback; } }
 
   function setIcons(root=document) {
     $$('[data-icon]', root).forEach(el => {
@@ -214,11 +222,10 @@
     $$('.nav-item').forEach(btn => btn.classList.toggle('active', btn.dataset.view===view));
     $$('.mobile-nav-item').forEach(btn => btn.classList.toggle('active', btn.dataset.view===view));
     $$('.view').forEach(el => el.classList.toggle('active', el.id===`view-${view}`));
-    const labels = {dashboard:'ОБЗОР',entries:'ЖУРНАЛ',calendar:'КАЛЕНДАРЬ',templates:'SHORTCUTS',settings:'ПАРАМЕТРЫ'};
+    const labels = {dashboard:'ОБЗОР',calendar:'КАЛЕНДАРЬ',templates:'БЫСТРЫЕ ЗАДАЧИ',settings:'НАСТРОЙКИ'};
     $('#pageEyebrow').textContent = labels[view] || 'WORK TIME';
     $('#pageDate').textContent = new Intl.DateTimeFormat('ru-RU',{weekday:'long',day:'numeric',month:'long'}).format(new Date());
     if (view==='calendar') renderCalendar();
-    if (view==='entries') renderEntries();
     if (view==='templates') renderTemplates();
     if (view==='settings') renderSettings();
     window.scrollTo({top:0,behavior:'smooth'});
@@ -227,8 +234,7 @@
   function bindNavigation() {
     $$('.nav-item,.mobile-nav-item').forEach(btn => btn.addEventListener('click',()=>switchView(btn.dataset.view)));
     $$('[data-view-link]').forEach(btn => btn.addEventListener('click',()=>switchView(btn.dataset.viewLink)));
-    $('#heroAddButton').addEventListener('click',()=>openRecordModal(null,state.selectedDate));
-    $('#entryAdd').addEventListener('click',()=>openRecordModal(null,state.selectedDate));
+    $('#heroAddButton').addEventListener('click',()=>{const d=localDate();state.month=d.slice(0,7);state.selectedDate=d;$('#monthPicker').value=state.month;switchView('calendar');renderCalendar();if(isValidWorkDate(d))openRecordModal(null,d);else toast('Сегодня списание заблокировано: выходной, праздник или отсутствие.',true);});
     $('#templateAdd').addEventListener('click',()=>openTemplateModal());
     $('#refreshButton').addEventListener('click',()=>loadData(true));
     $('#mobileSync').addEventListener('click',()=>state.mode==='google'?switchView('settings'):connectGoogle(true));
@@ -237,7 +243,6 @@
     $('#monthPicker').addEventListener('change',()=>setMonth($('#monthPicker').value));
     $('#calendarPrev').addEventListener('click',()=>moveMonth(-1));
     $('#calendarNext').addEventListener('click',()=>moveMonth(1));
-    $('#entrySearch').addEventListener('input',renderEntries);
     $('#settingsSave').addEventListener('click',saveSettingsUi);
     $('#googleConnect').addEventListener('click',()=>connectGoogle(true));
     $('#authConnect').addEventListener('click',()=>connectGoogle(true));
@@ -246,6 +251,8 @@
     $('#backupCreate').addEventListener('click',createBackup);
     $('#backupRestore').addEventListener('click',()=>$('#restoreInput').click());
     $('#restoreInput').addEventListener('change',restoreLocalBackup);
+    $('#absenceAdd').addEventListener('click',saveAbsenceIntervalUi);
+    $('#holidayAdd').addEventListener('click',saveHolidayUi);
   }
 
   function setMonth(month) {
@@ -411,7 +418,7 @@
     }
     async seedSpreadsheet(id) {
       const records=[], days=[], settings=Object.entries({...DEFAULT_SETTINGS,workdays:DEFAULT_SETTINGS.workdays.join(',')}).map(([key,value])=>[key,String(value)]);
-      const templates=DEFAULT_TEMPLATES.map(([name,category,minutes,note])=>[uid(),name,category,String(minutes),note]);
+      const templates=DEFAULT_TEMPLATES.map(name=>[uid(),name]);
       await Promise.all([
         googleClient.writeSheet(id,SHEET_NAMES.records,HEADERS.records,records),
         googleClient.writeSheet(id,SHEET_NAMES.days,HEADERS.days,days),
@@ -430,31 +437,38 @@
       const data = await googleClient.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}/values:batchGet?majorDimension=ROWS&ranges=${ranges}`);
       const valueRanges = data.valueRanges || [];
       const [recordsRows,daysRows,settingsRows,templateRows] = valueRanges.map(x=>x.values||[]);
-      state.records = rowsToObjects(HEADERS.records,recordsRows);
+      state.records = rowsToObjects(HEADERS.records,recordsRows).map(r=>({ ...r, minutes:Number(r.minutes)||0, jira:isJiraValue(r.jira ?? r.jiraMinutes) }));
       state.days = rowsToObjects(HEADERS.days,daysRows);
       state.settings = parseSettings(settingsRows);
-      if (!state.settings.dailyNormMinutes) state.settings.dailyNormMinutes=DEFAULT_SETTINGS.dailyNormMinutes;
-      if (!Array.isArray(state.settings.workdays)) state.settings.workdays=[...DEFAULT_SETTINGS.workdays];
-      state.templates = rowsToObjects(HEADERS.templates,templateRows).map(x=>({...x,minutes:Number(x.minutes)||60}));
-      if (!state.templates.length) { state.templates = DEFAULT_TEMPLATES.map(([name,category,minutes,note])=>({id:uid(),name,category,minutes,note})); await this.writeTemplates(); }
+      state.settings.dailyNormMinutes=480;
+      if (!Array.isArray(state.settings.workdays) || !state.settings.workdays.length) state.settings.workdays=[...DEFAULT_SETTINGS.workdays];
+      state.periods = Array.isArray(state.settings.absencePeriods) ? state.settings.absencePeriods : state.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''}));
+      state.holidays = Array.isArray(state.settings.holidays) ? state.settings.holidays.map(h=>typeof h==='string'?{date:h,name:'Праздничный день'}:h).filter(h=>h?.date) : [];
+      state.templates = rowsToObjects(HEADERS.templates,templateRows).filter(x=>x.name).map(x=>({id:x.id||uid(),name:String(x.name)}));
+      if (!state.templates.length) state.templates = DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
+      // Upgrade legacy sheets in place: Jira numeric values become a boolean flag,
+      // and task templates are reduced to their name-only schema.
+      await Promise.all([this.writeRecords(), this.writeTemplates(), this.writeSettings()]);
+      if (state.days.length) { state.days=[]; await this.writeDays(); }
       state.connected=true;
-      await googleClient.saveAppDataConfig({version:1,spreadsheetId:id,updatedAt:new Date().toISOString()});
+      await googleClient.saveAppDataConfig({version:2,spreadsheetId:id,updatedAt:new Date().toISOString()});
       return state;
     }
     async writeRecords() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.records,HEADERS.records,state.records.map(r=>HEADERS.records.map(k=>r[k]??''))); }
     async writeDays() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.days,HEADERS.days,state.days.map(r=>HEADERS.days.map(k=>r[k]??''))); }
-    async writeSettings() { const rows=Object.entries({dailyNormMinutes:state.settings.dailyNormMinutes,workdays:state.settings.workdays.join(','),appName:state.settings.appName,currency:'hours'}).map(([k,v])=>[k,String(v)]); await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.settings,HEADERS.settings,rows); }
-    async writeTemplates() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.templates,HEADERS.templates,state.templates.map(r=>HEADERS.templates.map(k=>r[k]??''))); }
+    async writeSettings() { const rows=Object.entries({dailyNormMinutes:480,workdays:state.settings.workdays.join(','),appName:state.settings.appName,currency:'hours',absencePeriods:JSON.stringify(state.periods||[]),holidays:JSON.stringify(state.holidays||[])}).map(([k,v])=>[k,String(v)]); await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.settings,HEADERS.settings,rows); }
+    async writeTemplates() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.templates,HEADERS.templates,state.templates.map(r=>[r.id,r.name])); }
     async saveRecord(record) {
+      const previousRecords=[...state.records];
       const now = new Date().toISOString();
-      const next = {...record,id:record.id||uid(),minutes:Number(record.minutes),jiraMinutes:Number(record.jiraMinutes||0),createdAt:record.createdAt||now,updatedAt:now};
+      const next = {...record,id:record.id||uid(),minutes:Number(record.minutes),jira:!!record.jira,createdAt:record.createdAt||now,updatedAt:now};
       if (!next.task.trim()) throw new Error('Укажите задачу.');
       if (!(next.minutes>0) || next.minutes>1440) throw new Error('Время должно быть от 1 минуты до 24 часов.');
-      if (next.jiraMinutes<0 || next.jiraMinutes>next.minutes) throw new Error('Jira не может быть больше общей длительности.');
+      if (!isValidWorkDate(next.date)) throw new Error('Списывать время можно только в рабочие дни, кроме праздников и периодов отсутствия.');
       const idx=state.records.findIndex(x=>x.id===next.id); if(idx>=0) state.records[idx]=next; else state.records.unshift(next);
-      await this.writeRecords(); return next;
+      try { await this.writeRecords(); return next; } catch (error) { state.records=previousRecords; throw error; }
     }
-    async deleteRecord(id) { state.records=state.records.filter(r=>r.id!==id); await this.writeRecords(); }
+    async deleteRecord(id) { const previousRecords=[...state.records]; state.records=state.records.filter(r=>r.id!==id); try { await this.writeRecords(); } catch (error) { state.records=previousRecords; throw error; } }
     async saveDay(date,status,comment='') {
       const row={date,status,comment,updatedAt:new Date().toISOString()};
       const idx=state.days.findIndex(x=>x.date===date); if(idx>=0) state.days[idx]=row; else state.days.push(row);
@@ -463,18 +477,24 @@
     }
     async deleteDay(date) { state.days=state.days.filter(x=>x.date!==date); await this.writeDays(); }
     async saveTemplate(t) {
-      const row={...t,id:t.id||uid(),minutes:Number(t.minutes)||60,note:t.note||''}; if(!row.name.trim()) throw new Error('Укажите название задачи.');
-      const idx=state.templates.findIndex(x=>x.id===row.id); if(idx>=0)state.templates[idx]=row;else state.templates.push(row);await this.writeTemplates();return row;
+      const previous=[...state.templates];
+      const row={id:t.id||uid(),name:String(t.name||'').trim()}; if(!row.name) throw new Error('Укажите название задачи.');
+      const idx=state.templates.findIndex(x=>x.id===row.id); if(idx>=0)state.templates[idx]=row;else state.templates.push(row);
+      try { await this.writeTemplates(); return row; } catch (error) { state.templates=previous; throw error; }
     }
-    async deleteTemplate(id) { state.templates=state.templates.filter(x=>x.id!==id); await this.writeTemplates(); }
-    async saveSettings(settings) { state.settings={...state.settings,...settings}; await this.writeSettings(); }
-    backupPayload() { return JSON.stringify({version:1,app:'Work Time',exportedAt:new Date().toISOString(),records:state.records,days:state.days,settings:[{key:'dailyNormMinutes',value:state.settings.dailyNormMinutes},{key:'workdays',value:state.settings.workdays.join(',')},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'}],templates:state.templates},null,2); }
+    async deleteTemplate(id) { const previous=[...state.templates]; state.templates=state.templates.filter(x=>x.id!==id); try { await this.writeTemplates(); } catch (error) { state.templates=previous; throw error; } }
+    async saveSettings(settings) { const previous={...state.settings}; state.settings={...state.settings,...settings}; try { await this.writeSettings(); } catch (error) { state.settings=previous; throw error; } }
+    backupPayload() { return JSON.stringify({version:2,app:'Work Time',exportedAt:new Date().toISOString(),records:state.records,periods:state.periods,holidays:state.holidays,days:[],settings:[{key:'dailyNormMinutes',value:480},{key:'workdays',value:state.settings.workdays.join(',')},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'},{key:'absencePeriods',value:JSON.stringify(state.periods)},{key:'holidays',value:JSON.stringify(state.holidays)}],templates:state.templates.map(t=>({id:t.id,name:t.name}))},null,2); }
     async restore(payload) {
-      if(payload?.version!==1) throw new Error('Неподдерживаемый формат резервной копии.');
-      state.records=Array.isArray(payload.records)?payload.records:[]; state.days=Array.isArray(payload.days)?payload.days:[]; state.templates=Array.isArray(payload.templates)?payload.templates:[]; state.settings=parseSettings((payload.settings||[]).map(x=>[x.key,x.value]));
-      if(!state.settings.dailyNormMinutes) state.settings.dailyNormMinutes=480;
-      if(!Array.isArray(state.settings.workdays)) state.settings.workdays=[1,2,3,4,5];
-      if(!state.templates.length)state.templates=DEFAULT_TEMPLATES.map(([name,category,minutes,note])=>({id:uid(),name,category,minutes,note}));
+      if(![1,2].includes(payload?.version)) throw new Error('Неподдерживаемый формат резервной копии.');
+      state.records=(Array.isArray(payload.records)?payload.records:[]).map(r=>({...r,jira:isJiraValue(r.jira ?? r.jiraMinutes)}));
+      state.days=[];
+      const parsedSettings=parseSettings((payload.settings||[]).map(x=>[x.key,x.value]));
+      state.settings={...state.settings,...parsedSettings,dailyNormMinutes:480};
+      state.periods=Array.isArray(payload.periods)?payload.periods:(Array.isArray(parsedSettings.absencePeriods)?parsedSettings.absencePeriods:(Array.isArray(payload.days)?payload.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''})):[]));
+      state.holidays=(Array.isArray(payload.holidays)?payload.holidays:(Array.isArray(parsedSettings.holidays)?parsedSettings.holidays:[])).map(h=>typeof h==='string'?{date:h,name:'Праздничный день'}:h).filter(h=>h?.date);
+      state.templates=(Array.isArray(payload.templates)?payload.templates:[]).filter(t=>t.name).map(t=>({id:t.id||uid(),name:String(t.name)}));
+      if(!state.templates.length)state.templates=DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
       await Promise.all([this.writeRecords(),this.writeDays(),this.writeSettings(),this.writeTemplates()]);
     }
   }
@@ -487,7 +507,7 @@
   }
   function parseSettings(rows) {
     const map={}; (rows||[]).slice(1).forEach(r=>{if(r?.[0])map[String(r[0])]=r[1]??'';});
-    return {dailyNormMinutes:Number(map.dailyNormMinutes)||DEFAULT_SETTINGS.dailyNormMinutes,workdays:String(map.workdays||'1,2,3,4,5').split(',').map(Number).filter(Boolean),appName:String(map.appName||DEFAULT_SETTINGS.appName),currency:'hours'};
+    return {dailyNormMinutes:480,workdays:String(map.workdays||'1,2,3,4,5').split(',').map(Number).filter(n=>n>=1&&n<=5),appName:String(map.appName||DEFAULT_SETTINGS.appName),currency:'hours',absencePeriods:Object.prototype.hasOwnProperty.call(map,'absencePeriods')?safeJson(map.absencePeriods,[]):null,holidays:Object.prototype.hasOwnProperty.call(map,'holidays')?safeJson(map.holidays,[]):[]};
   }
   function columnName(n) { let s=''; while(n>0){let r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}return s; }
 
@@ -554,7 +574,7 @@
     $('#monthLabel').textContent=monthLong(state.month);
     $('#calendarTitle').textContent=monthLong(state.month).replace(/ \d+$/,'');
     $('#pageDate').textContent=new Intl.DateTimeFormat('ru-RU',{weekday:'long',day:'numeric',month:'long'}).format(new Date());
-    renderDashboard(); renderEntries(); renderCalendar(); renderTemplates(); renderSettings(); updateTimerUi(); setIcons();
+    renderDashboard(); renderCalendar(); renderTemplates(); renderSettings(); updateTimerUi(); setIcons();
   }
   function renderConnection() {
     const connected=state.mode==='google' && state.connected && !!state.spreadsheetId;
@@ -580,13 +600,13 @@
 
   function renderDashboard() {
     const today=state.month===localMonth()?localDate():`${state.month}-01`;
-    state.selectedDate=today;
     const t=todayTotals();
-    $('#heroTitle').textContent = isDayOff(today)?(STATUS_META[statusForDay(today)?.key]?.label || 'Сегодня'):'Рабочий день';
+    const todayStatus=statusForDay(today), todayHoliday=holidayForDay(today);
+    $('#heroTitle').textContent = todayStatus?.label || (todayHoliday ? (typeof todayHoliday==='string'?'Праздничный день':todayHoliday.name||'Праздничный день') : (isBlockedDay(today)?'Выходной':'Рабочий день'));
     $('#heroDateLabel').textContent = new Intl.DateTimeFormat('ru-RU',{weekday:'long',day:'numeric',month:'long'}).format(dateFromIso(today));
     $('#todayLogged').textContent=formatHours(t.minutes); $('#todayNorm').textContent=formatHours(t.norm); $('#todayJira').textContent=formatHours(t.jira); $('#todayBalance').textContent=formatSigned(t.minutes-t.norm);
     const pct=t.norm?Math.min(100,(t.minutes/t.norm)*100):100; $('#progressRing').style.background=`conic-gradient(#7b6cff ${pct*3.6}deg,rgba(255,255,255,.10) ${pct*3.6}deg)`;
-    renderWeekStrip(); renderStats(); renderDailyList(); renderRecent();
+    renderWeekStrip(); renderStats(); renderRecent();
   }
   function todayTotals() {
     const today = state.month===localMonth()?localDate():`${state.month}-01`; const d=totalsForDay(today); return {...d,norm:minutesForDay(today)};
@@ -600,40 +620,17 @@
       {label:'За месяц',value:formatHours(t.logged),sub:`Норма ${formatHours(t.norm)}`,icon:'clock',tone:'purple'},
       {label:'Баланс',value:formatSigned(t.balance),sub:t.balance>=0?'Время сверх нормы':'Нужно добрать',icon:'check',tone:t.balance>=0?'green':'amber'},
       {label:'Списано в Jira',value:formatHours(t.jira),sub:t.logged?`${Math.round(t.jira/t.logged*100)}% от учтённого времени`:'Пока нет списаний',icon:'zap',tone:'dark'},
-      {label:'Рабочих дней',value:String(monthDays(state.month).filter(d=>minutesForDay(d)>0).length),sub:`${state.settings.workdays.length} дня в неделе`,icon:'calendar',tone:'green'}
+      {label:'Рабочих дней',value:String(monthDays(state.month).filter(d=>minutesForDay(d)>0).length),sub:`Рабочих дней в неделе: ${state.settings.workdays.length}`,icon:'calendar',tone:'green'}
     ];
     $('#statsGrid').innerHTML=cards.map(c=>`<div class="stat-card"><div class="stat-top"><span class="stat-label">${c.label}</span><span class="stat-icon ${c.tone}"><span data-icon="${c.icon}"></span></span></div><div class="stat-value">${c.value}</div><div class="stat-sub">${c.sub}</div></div>`).join(''); setIcons($('#statsGrid'));
   }
   function dailyTone(date) {
-    const t=totalsForDay(date), norm=minutesForDay(date), off=isDayOff(date), future=!isPast(date)&&date!==localDate();
-    if(off) return 'off'; if(!norm) return 'off'; if(t.minutes>=norm) return 'good'; if(t.minutes>0) return 'warn'; if(future) return 'warn'; return 'bad';
-  }
-  function isDayOff(date) { return !!statusForDay(date) || !isWorkday(date); }
-  function renderDailyList() {
-    const days=monthDays(state.month).filter(d=>isWorkday(d)||totalsForDay(d).minutes>0||statusForDay(d));
-    if(!days.length){$('#dailyList').innerHTML=`<div class="empty-state">В этом месяце нет рабочих дней.</div>`;return;}
-    $('#dailyList').innerHTML=days.slice().reverse().map(date=>{
-      const t=totalsForDay(date),norm=minutesForDay(date), tone=dailyTone(date), explicit=statusForDay(date), progress=norm?Math.min(100,t.minutes/norm*100):0;
-      const statusLabel=explicit?explicit.label:(norm?formatHours(norm):'Выходной');
-      return `<button class="daily-row" data-date="${date}" type="button"><div class="date-box"><strong>${formatDate(date,{day:'2-digit',month:'short'})}</strong><span>${new Intl.DateTimeFormat('ru-RU',{weekday:'short'}).format(dateFromIso(date))}</span></div><div class="day-bar"><div class="day-bar-meta"><span>${statusLabel}</span><span>${formatHours(t.minutes)}${norm?` / ${formatHours(norm)}`:''}</span></div><div class="bar"><span class="${tone}" style="width:${progress}%"></span></div></div><div class="jira-value">${t.jira?`<span class="pill jira">Jira ${formatHours(t.jira)}</span>`:'<span class="pill soft">—</span>'}</div><span class="row-status ${tone}"></span></button>`;
-    }).join('');
-    $$('#dailyList .daily-row').forEach(btn=>btn.addEventListener('click',()=>{state.selectedDate=btn.dataset.date;switchView('calendar');renderCalendar();}));
+    const t=totalsForDay(date), norm=minutesForDay(date);
+    if(isBlockedDay(date) || !norm) return 'off'; if(periodForDay(date)) return 'good'; if(t.minutes===norm) return 'good'; if(t.minutes>norm) return 'warn'; return 'bad';
   }
   function renderRecent() {
     const rows=state.records.slice().sort((a,b)=>String(b.updatedAt||b.date).localeCompare(String(a.updatedAt||a.date))).slice(0,7);
-    $('#recentEntries').innerHTML=rows.length?rows.map(r=>`<div class="recent-row"><div class="task-dot">${escapeHtml((r.task||'•').trim()[0]?.toUpperCase()||'•')}</div><div class="recent-copy"><strong>${escapeHtml(r.task)}</strong><span>${formatDate(r.date,{day:'2-digit',month:'short'})}${r.category?` · ${escapeHtml(r.category)}`:''}</span></div><div class="recent-time">${formatHours(r.minutes)}</div></div>`).join(''):`<div class="empty-state">Записей пока нет.</div>`;
-  }
-
-  function renderEntries() {
-    const q=($('#entrySearch')?.value||'').trim().toLowerCase();
-    const rows=state.records.filter(r=>[r.task,r.category,r.note,r.date].join(' ').toLowerCase().includes(q)).slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
-    $('#entryCount').textContent=`${rows.length} ${plural(rows.length,'запись','записи','записей')}`;
-    $('#entriesEmpty').classList.toggle('hidden',rows.length!==0);
-    $('#entriesEmpty').textContent=q?'По вашему запросу записей не найдено.':'Добавьте первую запись через кнопку «Новая запись».';
-    $('#entriesBody').innerHTML=rows.map(r=>`<tr><td><strong>${formatDate(r.date,{day:'2-digit',month:'short',year:'numeric'})}</strong></td><td><div class="table-task">${escapeHtml(r.task)}</div></td><td>${r.category?`<span class="pill soft">${escapeHtml(r.category)}</span>`:'—'}</td><td><strong>${formatHours(r.minutes)}</strong></td><td>${Number(r.jiraMinutes)?`<span class="pill jira">${formatHours(r.jiraMinutes)}</span>`:'—'}</td><td><div class="table-note">${escapeHtml(r.note||'—')}</div></td><td><div class="row-actions"><button class="row-action" data-edit-record="${r.id}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-delete-record="${r.id}" aria-label="Удалить"><span data-icon="trash"></span></button></div></td></tr>`).join('');
-    setIcons($('#entriesBody'));
-    $$('[data-edit-record]').forEach(btn=>btn.addEventListener('click',()=>openRecordModal(state.records.find(x=>x.id===btn.dataset.editRecord))));
-    $$('[data-delete-record]').forEach(btn=>btn.addEventListener('click',()=>deleteRecordUi(btn.dataset.deleteRecord)));
+    $('#recentEntries').innerHTML=rows.length?rows.map(r=>`<div class="recent-row"><div class="task-dot">${escapeHtml((r.task||'•').trim()[0]?.toUpperCase()||'•')}</div><div class="recent-copy"><strong>${escapeHtml(r.task)}</strong><span>${formatDate(r.date,{day:'2-digit',month:'short'})}${r.category?` · ${escapeHtml(r.category)}`:''}</span></div><div class="recent-time">${formatHours(r.minutes)}${r.jira?' · Jira ✓':''}</div></div>`).join(''):`<div class="empty-state">Записей пока нет.</div>`;
   }
 
   function renderCalendar() {
@@ -641,52 +638,104 @@
     const [y,m]=state.month.split('-').map(Number); const first=new Date(y,m-1,1); const offset=(first.getDay()||7)-1; const total=daysInMonth(state.month); const cells=[];
     for(let i=0;i<offset;i++){const d=new Date(y,m-1,1-offset+i);cells.push(`<div class="calendar-cell muted"><div class="calendar-date"><span>${d.getDate()}</span></div></div>`);}
     for(let day=1;day<=total;day++){
-      const iso=`${state.month}-${String(day).padStart(2,'0')}`;const t=totalsForDay(iso),tone=dailyTone(iso),selected=iso===state.selectedDate;const explicit=statusForDay(iso);const note=explicit?explicit.label:(minutesForDay(iso)?`${Math.round(Math.min(100,t.minutes/Math.max(1,minutesForDay(iso))*100))}% нормы`:'Выходной');
-      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''}" data-cal-date="${iso}" type="button"><div class="calendar-date"><span>${day}</span>${explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:''}</div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ${formatHours(t.jira)} · `:''}${note}</div></button>`);
+      const iso=`${state.month}-${String(day).padStart(2,'0')}`;const t=totalsForDay(iso),tone=dailyTone(iso),selected=iso===state.selectedDate;const explicit=statusForDay(iso);const holiday=holidayForDay(iso);const blocked=isBlockedDay(iso);const absent=!!periodForDay(iso);
+      const note=explicit?explicit.label:(holiday?(typeof holiday==='string'?'Праздник':holiday.name||'Праздник'):(blocked?'Выходной':`${formatHours(t.minutes)} / 8:00`));
+      const badge=explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:holiday?`<span class="pill amber">Праздник</span>`:((!isWorkday(iso)||[6,7].includes(isoWeekday(iso)))?`<span class="pill soft">Выходной</span>`:'');
+      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''} ${blocked?'is-blocked':''}" data-cal-date="${iso}" type="button" title="${escapeAttr(holiday?(typeof holiday==='string'?'Праздничный день':holiday.name||'Праздничный день'):note)}"><div class="calendar-date"><span>${day}</span>${badge}</div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ✓ · `:''}${escapeHtml(note)}</div></button>`);
     }
     $('#calendarGrid').innerHTML=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(x=>`<div class="calendar-weekday">${x}</div>`).join('')+cells.join('');
     setIcons($('#calendarGrid'));
-    $$('[data-cal-date]').forEach(btn=>btn.addEventListener('click',()=>{state.selectedDate=btn.dataset.calDate;renderCalendar();renderSelectedDay();}));
+    $$('[data-cal-date]').forEach(btn=>btn.addEventListener('click',()=>{state.selectedDate=btn.dataset.calDate;renderCalendar();}));
     renderSelectedDay();
   }
   function renderSelectedDay() {
-    const date=state.selectedDate; const explicit=statusForDay(date); const t=totalsForDay(date), norm=minutesForDay(date); const meta=explicit||{label:isWorkday(date)?'Рабочий день':'Выходной',tone:'soft'};
+    const date=state.selectedDate; const explicit=statusForDay(date); const holiday=holidayForDay(date); const blocked=isBlockedDay(date); const absence=!!periodForDay(date); const t=totalsForDay(date), norm=minutesForDay(date);
+    const fallbackLabel=holiday?(typeof holiday==='string'?'Праздничный день':holiday.name||'Праздничный день'):(blocked?'Выходной':'Рабочий день');
+    const meta=explicit||{label:fallbackLabel,tone:blocked?'soft':'soft',icon:blocked?'coffee':'calendar'};
     $('#selectedDayTitle').textContent=formatDate(date,{day:'numeric',month:'long',year:'numeric'});
-    $('#selectedDayContent').innerHTML=`<div class="day-detail"><div class="day-detail-head"><div class="day-detail-icon"><span data-icon="${explicit?.icon||'calendar'}"></span></div><div><h4>${escapeHtml(meta.label)}</h4><small>${new Intl.DateTimeFormat('ru-RU',{weekday:'long'}).format(dateFromIso(date))}</small></div></div><div class="detail-stat"><div class="detail-chip"><span>Учтено</span><strong>${formatHours(t.minutes)}</strong></div><div class="detail-chip"><span>Норма</span><strong>${formatHours(norm)}</strong></div><div class="detail-chip"><span>Jira</span><strong>${formatHours(t.jira)}</strong></div><div class="detail-chip"><span>Баланс</span><strong>${formatSigned(t.minutes-norm)}</strong></div></div><div class="field-label" style="margin-top:18px">Статус<select id="dayStatusField" class="field day-status-select"><option value="work">Рабочий</option><option value="vacation">Отпуск</option><option value="sick">Больничный</option><option value="dayoff">Day off</option></select></div><label class="field-label">Комментарий<textarea id="dayCommentField" class="field" rows="3" placeholder="Например: отпуск в Японии">${escapeHtml(state.days.find(x=>x.date===date)?.comment||'')}</textarea></label><div class="button-row"><button class="primary-button" id="saveDayBtn"><span data-icon="check"></span> Сохранить день</button>${explicit?'<button class="secondary-button" id="resetDayBtn">Сбросить статус</button>':''}</div></div>`;
-    $('#dayStatusField').value=explicit?.key||'work'; setIcons($('#selectedDayContent'));
-    $('#saveDayBtn').addEventListener('click',async()=>{try{setBusyButton('#saveDayBtn',true);await store.saveDay(date,$('#dayStatusField').value,$('#dayCommentField').value.trim());toast('Статус дня сохранён');renderAll();}catch(e){toast(e.message,true);}finally{setBusyButton('#saveDayBtn',false);}});
-    $('#resetDayBtn')?.addEventListener('click',async()=>{try{await store.deleteDay(date);toast('Статус дня сброшен');renderAll();}catch(e){toast(e.message,true);}});
+    const canEditRecords=isValidWorkDate(date);
+    const rows=recordsForDay(date).map(r=>`<div class="calendar-record"><div class="calendar-record-main"><strong>${escapeHtml(r.task)}</strong><span>${formatHours(r.minutes)}${r.category?` · ${escapeHtml(r.category)}`:''}${r.jira?' · Jira ✓':''}</span>${r.note?`<small>${escapeHtml(r.note)}</small>`:''}</div><div class="row-actions">${canEditRecords?`<button class="row-action" data-cal-edit="${escapeAttr(r.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button>`:''}<button class="row-action" data-cal-delete="${escapeAttr(r.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></div>`).join('');
+    const addDisabled=blocked||absence;
+    const blockedMessage=holiday?`В праздничный день списание заблокировано${typeof holiday==='object'&&holiday.name?`: ${escapeHtml(holiday.name)}`:''}.`:blocked?([6,7].includes(isoWeekday(date))?'В выходные списание времени заблокировано.':'Эта дата не входит в ваш рабочий график.') :absence?`На период «${escapeHtml(meta.label)}» автоматически учтено 8:00. Ручные списания не нужны.`:'';
+    const recordSection=rows?`<div class="calendar-record-list">${rows}</div>`:'<div class="empty-state compact-empty">Записей за этот день нет.</div>';
+    $('#selectedDayContent').innerHTML=`<div class="day-detail"><div class="day-detail-head"><div class="day-detail-icon"><span data-icon="${meta.icon||'calendar'}"></span></div><div><h4>${escapeHtml(meta.label)}</h4><small>${new Intl.DateTimeFormat('ru-RU',{weekday:'long'}).format(dateFromIso(date))}</small></div></div><div class="detail-stat"><div class="detail-chip"><span>Учтено</span><strong>${formatHours(t.minutes)}</strong></div><div class="detail-chip"><span>Норма</span><strong>${formatHours(norm)}</strong></div><div class="detail-chip"><span>Jira ✓</span><strong>${formatHours(t.jira)}</strong></div><div class="detail-chip"><span>Баланс</span><strong>${formatSigned(t.minutes-norm)}</strong></div></div>${blockedMessage?`<div class="calendar-day-notice ${addDisabled?'blocked':'absence'}">${blockedMessage}</div>`:''}<div class="selected-records-head"><strong>Списания</strong>${!addDisabled?`<button class="primary-button compact-button" id="selectedAddRecord"><span data-icon="plus"></span> Добавить</button>`:''}</div>${recordSection}</div>`;
+    setIcons($('#selectedDayContent'));
+    $('#selectedAddRecord')?.addEventListener('click',()=>openRecordModal(null,date));
+    $$('[data-cal-edit]').forEach(btn=>btn.addEventListener('click',()=>openRecordModal(state.records.find(x=>x.id===btn.dataset.calEdit))));
+    $$('[data-cal-delete]').forEach(btn=>btn.addEventListener('click',()=>deleteRecordUi(btn.dataset.calDelete)));
   }
 
   function renderTemplates() {
     if(!state.templates.length){$('#templatesGrid').innerHTML='<div class="empty-state">Шаблонов нет. Создайте первый.</div>';return;}
     const icons=['zap','briefcase','coffee','wrench','file-spreadsheet'];
-    $('#templatesGrid').innerHTML=state.templates.map((t,i)=>`<article class="template-card"><div class="template-top"><span class="template-icon"><span data-icon="${icons[i%icons.length]}"></span></span><span class="pill soft">${formatHours(t.minutes)}</span></div><h3>${escapeHtml(t.name)}</h3><p>${escapeHtml(t.note||t.category||'Быстрая запись времени')}</p><div class="template-meta">${t.category?`<span>${escapeHtml(t.category)}</span>`:'<span>Без категории</span>'}</div><div class="template-actions"><button class="primary-button template-main" data-use-template="${t.id}">Добавить</button><button class="row-action" data-edit-template="${t.id}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-delete-template="${t.id}" aria-label="Удалить"><span data-icon="trash"></span></button></div></article>`).join('');
+    $('#templatesGrid').innerHTML=state.templates.map((t,i)=>`<article class="template-card"><div class="template-top"><span class="template-icon"><span data-icon="${icons[i%icons.length]}"></span></span><span class="pill soft">Шаблон</span></div><h3>${escapeHtml(t.name)}</h3><p>Только название задачи — длительность задаётся при списании.</p><div class="template-actions"><button class="primary-button template-main" data-use-template="${escapeAttr(t.id)}">Добавить списание</button><button class="row-action" data-edit-template="${escapeAttr(t.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-delete-template="${escapeAttr(t.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></article>`).join('');
     setIcons($('#templatesGrid'));
-    $$('[data-use-template]').forEach(btn=>btn.addEventListener('click',()=>{const t=state.templates.find(x=>x.id===btn.dataset.useTemplate);openRecordModal(null,state.selectedDate,t);}));
+    $$('[data-use-template]').forEach(btn=>btn.addEventListener('click',()=>{const t=state.templates.find(x=>x.id===btn.dataset.useTemplate);state.selectedDate=state.selectedDate||localDate();switchView('calendar');renderCalendar();if(isValidWorkDate(state.selectedDate))openRecordModal(null,state.selectedDate,t);else toast('Выберите рабочий день в календаре.',true);}));
     $$('[data-edit-template]').forEach(btn=>btn.addEventListener('click',()=>openTemplateModal(state.templates.find(x=>x.id===btn.dataset.editTemplate))));
     $$('[data-delete-template]').forEach(btn=>btn.addEventListener('click',()=>deleteTemplateUi(btn.dataset.deleteTemplate)));
   }
 
   function renderSettings() {
-    $('#settingsNorm').value=(Number(state.settings.dailyNormMinutes)||480)/60;
     $('#settingsAppName').value=state.settings.appName||'Work Time';
-    $('#workdaysPicker').innerHTML=[['Пн',1],['Вт',2],['Ср',3],['Чт',4],['Пт',5],['Сб',6],['Вс',7]].map(([label,n])=>`<button type="button" class="workday-chip ${state.settings.workdays.includes(n)?'active':''}" data-workday="${n}">${label}</button>`).join('');
-    $$('#workdaysPicker .workday-chip').forEach(btn=>btn.addEventListener('click',()=>{btn.classList.toggle('active');}));
-    renderBackups();
+    $('#workdaysPicker').innerHTML=[['Пн',1],['Вт',2],['Ср',3],['Чт',4],['Пт',5],['Сб',6],['Вс',7]].map(([label,n])=>`<button type="button" class="workday-chip ${n<=5&&state.settings.workdays.includes(n)?'active':''}" data-workday="${n}" ${n>=6?'disabled title="Выходные дни всегда заблокированы"':''}>${label}</button>`).join('');
+    $$('#workdaysPicker .workday-chip').forEach(btn=>btn.addEventListener('click',()=>btn.classList.toggle('active')));
+    const periods=[...state.periods].sort((a,b)=>a.startDate.localeCompare(b.startDate));
+    $('#absencePeriodsList').innerHTML=periods.length?periods.map(p=>`<div class="setting-list-row"><div><strong>${escapeHtml(STATUS_META[p.type]?.label||p.type)}</strong><span>${formatDate(p.startDate,{day:'numeric',month:'short',year:'numeric'})} — ${formatDate(p.endDate,{day:'numeric',month:'short',year:'numeric'})}${p.note?` · ${escapeHtml(p.note)}`:''}</span></div><button class="row-action" data-delete-period="${escapeAttr(p.id)}" aria-label="Удалить интервал"><span data-icon="trash"></span></button></div>`).join(''):'<div class="empty-state compact-empty">Интервалы отпуска, больничного и Day off не добавлены.</div>';
+    $('#holidaysList').innerHTML=state.holidays.length?[...state.holidays].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>`<div class="setting-list-row"><div><strong>${escapeHtml(h.name||'Праздничный день')}</strong><span>${formatDate(h.date,{day:'numeric',month:'short',year:'numeric'})}</span></div><button class="row-action" data-delete-holiday="${escapeAttr(h.date)}" aria-label="Удалить праздник"><span data-icon="trash"></span></button></div>`).join(''):'<div class="empty-state compact-empty">Праздничные даты не добавлены. Добавьте дни, когда списание должно быть заблокировано.</div>';
+    $$('[data-delete-period]').forEach(btn=>btn.addEventListener('click',()=>deleteAbsencePeriodUi(btn.dataset.deletePeriod)));
+    $$('[data-delete-holiday]').forEach(btn=>btn.addEventListener('click',()=>deleteHolidayUi(btn.dataset.deleteHoliday)));
+    renderBackups(); setIcons($('#view-settings'));
   }
-  function syncSettingsToUi() { if($('#settingsNorm')) renderSettings(); }
+  function syncSettingsToUi() { if($('#settingsAppName')) renderSettings(); }
   async function saveSettingsUi() {
     try {
       if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
-      const norm=Math.round(parseFloat($('#settingsNorm').value.replace(',','.'))*60);
-      if(!Number.isFinite(norm)||norm<0||norm>1440) throw new Error('Дневная норма должна быть от 0 до 24 часов.');
       const workdays=$$('#workdaysPicker .workday-chip.active').map(x=>Number(x.dataset.workday));
+      if(!workdays.length) throw new Error('Выберите хотя бы один рабочий день.');
+      const newlyBlocked=state.records.filter(r=>isWorkday(r.date)&&!workdays.includes(isoWeekday(r.date)));
+      if(newlyBlocked.length) throw new Error(`В ${newlyBlocked.length} списаниях используется день, который вы пытаетесь убрать из рабочего графика. Сначала перенесите или удалите эти записи.`);
       const appName=$('#settingsAppName').value.trim()||'Work Time';
-      state.settings={...state.settings,dailyNormMinutes:norm,workdays,appName};
-      await store.saveSettings({dailyNormMinutes:norm,workdays,appName});
+      await store.saveSettings({dailyNormMinutes:480,workdays,appName});
       renderAll(); renderConnection(); toast('Настройки сохранены в Google Sheets.');
     } catch(e) { toast(e.message,true); }
+  }
+  async function saveAbsenceIntervalUi() {
+    try {
+      if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
+      const startDate=$('#absenceStart').value, endDate=$('#absenceEnd').value, type=$('#absenceType').value, note=$('#absenceNote').value.trim();
+      if(!startDate||!endDate) throw new Error('Укажите начало и конец интервала.');
+      if(startDate>endDate) throw new Error('Дата начала должна быть не позже даты окончания.');
+      if(state.periods.some(p=>startDate<=p.endDate&&endDate>=p.startDate)) throw new Error('Этот период пересекается с уже добавленным интервалом.');
+      const conflicts=state.records.filter(r=>r.date>=startDate&&r.date<=endDate&&!isBlockedDay(r.date));
+      if(conflicts.length) throw new Error(`В периоде есть ${conflicts.length} списаний. Сначала удалите или перенесите их, затем добавьте отсутствие.`);
+      const previousPeriods=[...state.periods];
+      state.periods.push({id:uid(),startDate,endDate,type,note});
+      try { await store.saveSettings({}); } catch (error) { state.periods=previousPeriods; throw error; }
+      $('#absenceStart').value='';$('#absenceEnd').value='';$('#absenceNote').value='';
+      renderAll();toast('Интервал отсутствия добавлен; рабочие дни автоматически учитываются как 8:00.');
+    } catch(e){toast(e.message,true);}
+  }
+  async function deleteAbsencePeriodUi(id) {
+    if(!confirm('Удалить интервал отсутствия?'))return;
+    const previous=[...state.periods];
+    try{state.periods=state.periods.filter(p=>p.id!==id);await store.saveSettings({});renderAll();toast('Интервал удалён.');}catch(e){state.periods=previous;toast(e.message,true);}
+  }
+  async function saveHolidayUi() {
+    try {
+      if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
+      const date=$('#holidayDate').value, name=$('#holidayName').value.trim()||'Праздничный день';
+      if(!date) throw new Error('Выберите дату праздника.');
+      if(state.holidays.some(h=>h.date===date)) throw new Error('Эта дата уже добавлена в праздники.');
+      const conflicts=state.records.filter(r=>r.date===date);
+      if(conflicts.length) throw new Error('На эту дату есть списания. Сначала удалите их, затем добавьте праздник.');
+      const previousHolidays=[...state.holidays]; state.holidays.push({date,name}); try { await store.saveSettings({}); } catch (error) { state.holidays=previousHolidays; throw error; }
+      $('#holidayDate').value='';$('#holidayName').value='';renderAll();toast('Праздничная дата добавлена; списание заблокировано.');
+    } catch(e){toast(e.message,true);}
+  }
+  async function deleteHolidayUi(date) {
+    if(!confirm('Убрать эту праздничную дату?'))return;
+    const previous=[...state.holidays];
+    try{state.holidays=state.holidays.filter(h=>h.date!==date);await store.saveSettings({});renderAll();toast('Праздничная дата удалена.');}catch(e){state.holidays=previous;toast(e.message,true);}
   }
 
   async function createBackup() {
@@ -734,7 +783,7 @@
       const wb=XLSX.utils.book_new();
       const recordRows=[HEADERS.records,...state.records.map(r=>HEADERS.records.map(k=>r[k]??''))];
       const dayRows=[HEADERS.days,...state.days.map(r=>HEADERS.days.map(k=>r[k]??''))];
-      const settingRows=[HEADERS.settings,['dailyNormMinutes',state.settings.dailyNormMinutes],['workdays',state.settings.workdays.join(',')],['appName',state.settings.appName],['currency','hours']];
+      const settingRows=[HEADERS.settings,['dailyNormMinutes',480],['workdays',state.settings.workdays.join(',')],['appName',state.settings.appName],['currency','hours'],['absencePeriods',JSON.stringify(state.periods)],['holidays',JSON.stringify(state.holidays)]];
       const templateRows=[HEADERS.templates,...state.templates.map(r=>HEADERS.templates.map(k=>r[k]??''))];
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(recordRows),'Records');
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(dayRows),'Days');
@@ -744,22 +793,30 @@
     } catch(e){toast(e.message,true);} }
 
   function openRecordModal(record=null,date=state.selectedDate,template=null) {
-    const r=record||{date,task:template?.name||'',category:template?.category||'',minutes:template?.minutes||60,jiraMinutes:0,note:template?.note||''};
-    const templateOptions=`<option value="">Шаблон…</option>${state.templates.map(t=>`<option value="${t.id}">${escapeHtml(t.name)} · ${formatHours(t.minutes)}</option>`).join('')}`;
-    openModal(`<div class="form-grid"><label class="field-label">Дата<input id="recordDate" class="field" type="date" value="${escapeAttr(r.date||date)}"></label><label class="field-label">Шаблон<select id="recordTemplate" class="field">${templateOptions}</select></label></div><label class="field-label">Задача<input id="recordTask" class="field" value="${escapeAttr(r.task||'')}" placeholder="Например: подготовка отчёта" autofocus></label><div class="form-grid"><label class="field-label">Категория<input id="recordCategory" class="field" list="categoryList" value="${escapeAttr(r.category||'')}" placeholder="Разработка"><datalist id="categoryList"><option>Разработка</option><option>Встречи</option><option>Поддержка</option><option>Аналитика</option><option>Документация</option></datalist></label><label class="field-label">Время<input id="recordMinutes" class="field" value="${durationInput(r.minutes||60)}" placeholder="1:30"></label></div><div class="form-grid"><label class="field-label">Списано в Jira<input id="recordJira" class="field" value="${durationInput(r.jiraMinutes||0)}" placeholder="0:30"></label><label class="field-label">Комментарий<input id="recordNote" class="field" value="${escapeAttr(r.note||'')}" placeholder="Необязательно"></label></div><p style="margin:8px 0 0;color:#9ca3b2;font-size:10px">Формат длительности: <strong>1:30</strong> или <strong>1.5</strong> часа.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveRecordBtn"><span data-icon="check"></span> Сохранить</button></div>`,record?'Редактировать запись':'Новая запись');
-    $('#recordTemplate').addEventListener('change',e=>{const t=state.templates.find(x=>x.id===e.target.value);if(!t)return;$('#recordTask').value=t.name;$('#recordCategory').value=t.category||'';$('#recordMinutes').value=durationInput(t.minutes);$('#recordNote').value=t.note||'';});
+    const targetDate=record?.date||date||localDate();
+    if(!record && !isValidWorkDate(targetDate)){toast(blockedDateMessage(targetDate),true);return;}
+    const r=record||{date:targetDate,task:template?.name||'',category:'',minutes:60,jira:false,note:''};
+    const templateOptions=`<option value="">Шаблон…</option>${state.templates.map(t=>`<option value="${escapeAttr(t.id)}">${escapeHtml(t.name)}</option>`).join('')}`;
+    openModal(`<div class="form-grid"><label class="field-label">Дата<input id="recordDate" class="field" type="date" value="${escapeAttr(r.date||targetDate)}"></label><label class="field-label">Шаблон<select id="recordTemplate" class="field">${templateOptions}</select></label></div><label class="field-label">Задача<input id="recordTask" class="field" value="${escapeAttr(r.task||'')}" placeholder="Например: подготовка отчёта" autofocus></label><div class="form-grid"><label class="field-label">Категория<input id="recordCategory" class="field" list="categoryList" value="${escapeAttr(r.category||'')}" placeholder="Разработка"><datalist id="categoryList"><option>Разработка</option><option>Встречи</option><option>Поддержка</option><option>Аналитика</option><option>Документация</option></datalist></label><label class="field-label">Время<input id="recordMinutes" class="field" value="${durationInput(r.minutes||60)}" placeholder="1:30"></label></div><div class="form-grid"><label class="check-field"><input id="recordJira" type="checkbox" ${isJiraValue(r.jira ?? r.jiraMinutes)?'checked':''}><span>Списано в Jira</span></label><label class="field-label">Комментарий<input id="recordNote" class="field" value="${escapeAttr(r.note||'')}" placeholder="Необязательно"></label></div><p class="form-hint">Формат длительности: <strong>1:30</strong> или <strong>1.5</strong> часа. Полный рабочий день — 8:00.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveRecordBtn"><span data-icon="check"></span> Сохранить</button></div>`,record?'Редактировать списание':'Новое списание',true);
+    $('#recordTemplate').addEventListener('change',e=>{const t=state.templates.find(x=>x.id===e.target.value);if(t)$('#recordTask').value=t.name;});
     $('[data-close-modal]').addEventListener('click',closeModal);
     $('#saveRecordBtn').addEventListener('click',async()=>{
-      try{setBusyButton('#saveRecordBtn',true);const payload={...r,id:r.id,date:$('#recordDate').value,task:$('#recordTask').value.trim(),category:$('#recordCategory').value.trim(),minutes:parseDuration($('#recordMinutes').value),jiraMinutes:parseDuration($('#recordJira').value),note:$('#recordNote').value.trim()};await store.saveRecord(payload);closeModal();state.selectedDate=payload.date;state.month=payload.date.slice(0,7);$('#monthPicker').value=state.month;toast(record?'Запись обновлена':'Время записано');renderAll();}catch(e){toast(e.message,true);}finally{setBusyButton('#saveRecordBtn',false);}
+      try{
+        setBusyButton('#saveRecordBtn',true);
+        const newDate=$('#recordDate').value;
+        if(!isValidWorkDate(newDate)) throw new Error(blockedDateMessage(newDate));
+        const payload={...r,id:r.id,date:newDate,task:$('#recordTask').value.trim(),category:$('#recordCategory').value.trim(),minutes:parseDuration($('#recordMinutes').value),jira:$('#recordJira').checked,note:$('#recordNote').value.trim()};
+        await store.saveRecord(payload);closeModal();state.selectedDate=payload.date;state.month=payload.date.slice(0,7);$('#monthPicker').value=state.month;toast(record?'Списание обновлено':'Время записано');renderAll();switchView('calendar');renderCalendar();
+      }catch(e){toast(e.message,true);}finally{setBusyButton('#saveRecordBtn',false);}
     });
   }
-  async function deleteRecordUi(id) { if(!confirm('Удалить эту запись?'))return; try{await store.deleteRecord(id);toast('Запись удалена');renderAll();}catch(e){toast(e.message,true);} }
+  async function deleteRecordUi(id) { if(!confirm('Удалить это списание?'))return; try{await store.deleteRecord(id);toast('Списание удалено');renderAll();}catch(e){toast(e.message,true);} }
 
   function openTemplateModal(template=null) {
-    const t=template||{name:'',category:'',minutes:60,note:''};
-    openModal(`<label class="field-label">Название<input id="templateName" class="field" value="${escapeAttr(t.name)}" autofocus></label><div class="form-grid"><label class="field-label">Категория<input id="templateCategory" class="field" value="${escapeAttr(t.category||'')}"></label><label class="field-label">Время по умолчанию<input id="templateMinutes" class="field" value="${durationInput(t.minutes||60)}"></label></div><label class="field-label">Комментарий<input id="templateNote" class="field" value="${escapeAttr(t.note||'')}"></label><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveTemplateBtn"><span data-icon="check"></span> Сохранить</button></div>`,template?'Редактирование шаблона':'Новый шаблон');
+    const t=template||{name:''};
+    openModal(`<label class="field-label">Название задачи<input id="templateName" class="field" value="${escapeAttr(t.name)}" autofocus placeholder="Например: Разработка"></label><p class="form-hint">Шаблон хранит только название. Дату, длительность и Jira-флаг вы задаёте при добавлении списания.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveTemplateBtn"><span data-icon="check"></span> Сохранить</button></div>`,template?'Редактирование шаблона':'Новый шаблон');
     $('[data-close-modal]').addEventListener('click',closeModal);
-    $('#saveTemplateBtn').addEventListener('click',async()=>{try{setBusyButton('#saveTemplateBtn',true);await store.saveTemplate({id:t.id,name:$('#templateName').value.trim(),category:$('#templateCategory').value.trim(),minutes:parseDuration($('#templateMinutes').value),note:$('#templateNote').value.trim()});closeModal();renderAll();toast('Шаблон сохранён');}catch(e){toast(e.message,true);}finally{setBusyButton('#saveTemplateBtn',false);}});
+    $('#saveTemplateBtn').addEventListener('click',async()=>{try{setBusyButton('#saveTemplateBtn',true);await store.saveTemplate({id:t.id,name:$('#templateName').value.trim()});closeModal();renderAll();toast('Шаблон сохранён');}catch(e){toast(e.message,true);}finally{setBusyButton('#saveTemplateBtn',false);}});
   }
   async function deleteTemplateUi(id) { if(!confirm('Удалить шаблон?'))return; try{await store.deleteTemplate(id);renderAll();toast('Шаблон удалён');}catch(e){toast(e.message,true);} }
 
@@ -773,8 +830,16 @@
     if(t.running) requestAnimationFrame(updateTimerUi);
   }
   async function toggleTimer() {
-    if(!state.timer.running){state.timer.running=true;state.timer.startedAt=Date.now();$('#timerTemplate').disabled=true;updateTimerUi();return;}
-    state.timer.elapsed += Date.now()-state.timer.startedAt; state.timer.running=false; $('#timerTemplate').disabled=false; const minutes=Math.max(1,Math.round(state.timer.elapsed/60000)); const tid=$('#timerTemplate').value; const temp=state.templates.find(x=>x.id===tid); state.timer={running:false,startedAt:0,elapsed:0}; updateTimerUi(); openRecordModal(null,state.selectedDate,temp?{...temp,minutes}:null); setTimeout(()=>{$('#recordMinutes').value=durationInput(minutes);},30);
+    if(!state.timer.running){
+      const timerDate=state.selectedDate||localDate();
+      if(!isValidWorkDate(timerDate)){toast(blockedDateMessage(timerDate),true);return;}
+      state.timer.running=true;state.timer.startedAt=Date.now();state.timer.date=timerDate;$('#timerTemplate').disabled=true;updateTimerUi();return;
+    }
+    state.timer.elapsed += Date.now()-state.timer.startedAt; state.timer.running=false; $('#timerTemplate').disabled=false;
+    const minutes=Math.max(1,Math.round(state.timer.elapsed/60000)); const tid=$('#timerTemplate').value; const temp=state.templates.find(x=>x.id===tid); const timerDate=state.timer.date||state.selectedDate;
+    state.timer={running:false,startedAt:0,elapsed:0}; updateTimerUi();
+    if(!isValidWorkDate(timerDate)){toast('Дата таймера стала недоступна. Время не сохранено; выберите рабочий день и повторите запись.',true);return;}
+    openRecordModal(null,timerDate,temp?{...temp,minutes}:null); setTimeout(()=>{if($('#recordMinutes'))$('#recordMinutes').value=durationInput(minutes);},30);
   }
   function resetTimer(){state.timer={running:false,startedAt:0,elapsed:0};localStorage.removeItem('workTime.timer');$('#timerTemplate').disabled=false;updateTimerUi();}
   function initTimer() { const saved=JSON.parse(localStorage.getItem('workTime.timer')||'null'); if(saved?.running&&saved.startedAt){state.timer=saved;} setInterval(()=>{if(state.timer.running)localStorage.setItem('workTime.timer',JSON.stringify(state.timer));},1000); $('#timerButton').addEventListener('click',toggleTimer); $('#timerReset').addEventListener('click',resetTimer); $('#timerTemplate').addEventListener('change',e=>localStorage.setItem('workTime.timerTemplate',e.target.value)); const t=localStorage.getItem('workTime.timerTemplate');if(t)$('#timerTemplate').value=t; }
