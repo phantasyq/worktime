@@ -13,6 +13,7 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="./config.js"></script>
+  <script src="./production-calendar.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -133,9 +134,9 @@
         </section>
 
         <section class="view" id="view-settings">
-          <div class="page-heading"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Норма, рабочая неделя, Google Sheets и резервные копии.</p></div></div>
+          <div class="page-heading"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Производственный календарь России, отсутствие, Google Sheets и резервные копии.</p></div></div>
           <div class="settings-grid">
-            <section class="panel settings-panel"><div class="panel-head"><div><h3>Рабочий график</h3><p>Каждый рабочий день требует ровно 8 часов списаний. Праздники и выходные исключаются из нормы.</p></div></div><div class="form-grid"><div class="fixed-norm"><span>Норма рабочего дня</span><strong>8:00</strong></div><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label></div><div class="field-label">Рабочие дни<div id="workdaysPicker" class="workdays-picker"></div><p class="form-hint">Суббота и воскресенье всегда заблокированы.</p></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Производственный календарь</h3><p>Используется российский производственный календарь при пятидневной рабочей неделе. Праздники, перенесённые выходные и рабочие субботы определяются автоматически.</p></div></div><div class="production-calendar-info"><div class="production-calendar-mark"><span data-icon="calendar"></span></div><div><strong>Россия · норма 8:00 за рабочий день</strong><span id="productionCalendarStatus">Календарь будет обновлён автоматически при подключении к сети.</span></div></div><div class="form-grid"><label class="field-label">Название приложения<input id="settingsAppName" class="field"></label><div class="fixed-norm"><span>Норма рабочего дня</span><strong>8:00</strong></div></div><button class="primary-button" id="settingsSave"><span data-icon="check"></span> Сохранить</button></section>
             <section class="panel settings-panel">
               <div class="panel-head"><div><h3>Отпуск, больничный и Day off</h3><p>Добавьте интервал один раз. Каждый рабочий день внутри него автоматически учитывается как 8:00.</p></div></div>
               <div class="form-grid"><label class="field-label">С даты<input id="absenceStart" class="field" type="date" required></label><label class="field-label">По дату включительно<input id="absenceEnd" class="field" type="date" required></label></div>
@@ -143,13 +144,7 @@
               <button class="primary-button" id="absenceAdd"><span data-icon="plus"></span> Добавить интервал</button>
               <div id="absencePeriodsList" class="setting-list"></div>
             </section>
-            <section class="panel settings-panel">
-              <div class="panel-head"><div><h3>Праздничные дни</h3><p>Добавленные даты не допускают ручных списаний и не входят в месячную норму.</p></div></div>
-              <div class="form-grid"><label class="field-label">Дата праздника<input id="holidayDate" class="field" type="date" required></label><label class="field-label">Название<input id="holidayName" class="field" placeholder="Например: Новый год"></label></div>
-              <button class="secondary-button" id="holidayAdd"><span data-icon="plus"></span> Добавить праздник</button>
-              <div id="holidaysList" class="setting-list"></div>
-            </section>
-            <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">Подключите Google для онлайн-синхронизации.</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><div class="settings-google-connected"><strong>Синхронизация работает через ваш Google-аккаунт.</strong><span>Таблица создаётся автоматически. На другом устройстве приложение найдёт её само — достаточно войти в тот же Google-аккаунт.</span></div><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Отключить на этом устройстве</button></div></section>
+            <section class="panel settings-panel"><div class="panel-head"><div><h3>Google Sheets</h3><p id="sheetsStatus">Подключите Google для онлайн-синхронизации.</p></div><span class="status-badge" id="sheetsBadge">Не подключено</span></div><div class="settings-google-connected"><strong>Синхронизация работает через ваш Google-аккаунт. Вход сохраняется при перезагрузке текущей вкладки; после истечения срока доступа может потребоваться повторный вход.</strong><span>Таблица создаётся автоматически. На другом устройстве приложение найдёт её само — достаточно войти в тот же Google-аккаунт.</span></div><div class="button-row"><button class="primary-button" id="googleConnect"><span data-icon="log-in"></span> Подключить Google</button><button class="secondary-button" id="googleDisconnect"><span data-icon="log-out"></span> Отключить на этом устройстве</button></div></section>
             <section class="panel settings-panel"><div class="panel-head"><div><h3>Резервные копии</h3><p>Копия скачивается на устройство и при подключённом Google дублируется в Drive.</p></div></div><div class="button-row"><button class="secondary-button" id="backupCreate"><span data-icon="download"></span> Сделать backup</button><button class="secondary-button" id="backupRestore"><span data-icon="upload"></span> Восстановить</button></div><input type="file" id="restoreInput" accept="application/json,.json" class="hidden"><div id="backupList" class="backup-list"></div></section>
           </div>
         </section>
@@ -176,7 +171,7 @@
       </div>
       <div class="auth-actions"><button class="primary-button" id="authConnect"><span data-icon="log-in"></span> Войти через Google</button><a class="secondary-button" href="https://github.com/phantasyq/worktime/issues/new" target="_blank" rel="noopener">↗ Оставить отзыв</a></div>
       <div class="auth-error" id="authError"></div>
-      <div class="auth-foot">Приложение не получает доступ ко всему Google Drive: оно использует отдельные файлы, которые созданы или используются этим приложением.</div>
+      <div class="auth-foot">Приложение работает с отдельными файлами, которые использует оно само. Обычная перезагрузка этой вкладки сохраняет вход; после истечения срока Google-доступа может потребоваться повторное подтверждение.</div>
     </div>
   </div>
 

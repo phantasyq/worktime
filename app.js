@@ -26,6 +26,19 @@
     currency: 'hours'
   };
   const DEFAULT_TEMPLATES = ['Разработка','Встреча','Поддержка','Аналитика','Документация'];
+  const OAUTH_SESSION_KEY = 'workTime.oauthSession';
+  function readOAuthSession() {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(OAUTH_SESSION_KEY) || 'null');
+      if (cached && typeof cached.accessToken === 'string' && cached.accessToken && Number(cached.expiresAt) > Date.now() + 60000) {
+        return {token: cached.accessToken, expiresAt: Number(cached.expiresAt)};
+      }
+      sessionStorage.removeItem(OAUTH_SESSION_KEY);
+    } catch {}
+    return null;
+  }
+  function clearOAuthSession() { try { sessionStorage.removeItem(OAUTH_SESSION_KEY); } catch {} }
+  const restoredOAuthSession = readOAuthSession();
   const STATUS_META = {
     work: { label:'Рабочий', tone:'soft', icon:'briefcase' },
     vacation: { label:'Отпуск', tone:'purple', icon:'sun' },
@@ -73,7 +86,9 @@
     month: localMonth(),
     selectedDate: localDate(),
     spreadsheetId: localStorage.getItem('workTime.spreadsheetId') || '',
-    token: null,
+    token: restoredOAuthSession?.token || null,
+    tokenExpiresAt: restoredOAuthSession?.expiresAt || 0,
+    tokenPromise: null,
     tokenClient: null,
     profile: null,
     records: [],
@@ -147,10 +162,24 @@
   function formatDate(dateString, opts={day:'2-digit',month:'short'}) { return new Intl.DateTimeFormat('ru-RU', opts).format(dateFromIso(dateString)); }
   function monthLong(month) { const [y,m] = month.split('-').map(Number); return new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric'}).format(new Date(y,m-1,1)); }
   function isoWeekday(date) { const d = dateFromIso(date).getDay(); return d === 0 ? 7 : d; }
-  function isWorkday(date) { return state.settings.workdays.includes(isoWeekday(date)); }
-  function holidayForDay(date) { return state.holidays.find(h => (typeof h === 'string' ? h : h.date) === date) || null; }
+  function productionDay(date) { return window.ProductionCalendar?.status(date) || {working:![6,7].includes(isoWeekday(date)),source:'fallback',reason:''}; }
+  function isWorkday(date) { return !!productionDay(date).working; }
+  function holidayForDay(date) {
+    const status=productionDay(date);
+    if (status.working || [6,7].includes(isoWeekday(date))) return null;
+    return {date,name:status.reason||'Нерабочий день по производственному календарю',source:status.source||'production'};
+  }
   function isHoliday(date) { return !!holidayForDay(date); }
-  function isBlockedDay(date) { return [6,7].includes(isoWeekday(date)) || !isWorkday(date) || isHoliday(date); }
+  function isBlockedDay(date) { return !isWorkday(date); }
+  function isValidIsoDate(date) { if(!/^\d{4}-\d{2}-\d{2}$/.test(String(date||'')))return false; const d=dateFromIso(date); return Number.isFinite(d.getTime())&&localDate(d)===date; }
+  function refreshProductionCalendar(year) {
+    if(!window.ProductionCalendar?.refreshYear)return;
+    window.ProductionCalendar.refreshYear(Number(year)).then(changed=>{
+      if(changed){renderAll();renderConnection();}
+      const status=$('#productionCalendarStatus');
+      if(status)status.textContent=window.ProductionCalendar.statusText(Number(state.month.slice(0,4)));
+    }).catch(()=>{});
+  }
   function periodForDay(date) { return state.periods.find(p => p.startDate <= date && date <= p.endDate) || null; }
   function minutesForDay(date) {
     // The business rule is intentionally fixed: every eligible working day counts as 8 hours.
@@ -182,8 +211,8 @@
     const norm = days.reduce((a,d)=>a+minutesForDay(d),0);
     return {logged,jira,norm,balance:logged-norm};
   }
-  function isValidWorkDate(date) { return /^\d{4}-\d{2}-\d{2}$/.test(date) && !isBlockedDay(date) && !periodForDay(date); }
-  function blockedDateMessage(date) { if (periodForDay(date) && !isBlockedDay(date)) return 'На период отсутствия списание учтено автоматически как 8:00.'; if (isHoliday(date)) return 'На праздничные дни списание заблокировано.'; if ([6,7].includes(isoWeekday(date))) return 'В выходные дни списание заблокировано.'; if (!isWorkday(date)) return 'Эта дата не входит в ваш рабочий график.'; return 'На эту дату нельзя добавлять списания.'; }
+  function isValidWorkDate(date) { return isValidIsoDate(date) && isWorkday(date) && !periodForDay(date); }
+  function blockedDateMessage(date) { if (periodForDay(date) && isWorkday(date)) return 'На период отсутствия списание учтено автоматически как 8:00.'; if (isHoliday(date)) return `По производственному календарю это нерабочий день: ${holidayForDay(date).name}.`; if (!isWorkday(date)) return 'В этот день ручное списание заблокировано производственным календарём России.'; return 'На эту дату нельзя добавлять списания.'; }
   function isJiraValue(value) { return value === true || ['true','yes','1','да'].includes(String(value ?? '').trim().toLowerCase()) || (Number(value)>0); }
   function safeJson(value, fallback) { try { const parsed=JSON.parse(value); return parsed ?? fallback; } catch { return fallback; } }
 
@@ -252,7 +281,6 @@
     $('#backupRestore').addEventListener('click',()=>$('#restoreInput').click());
     $('#restoreInput').addEventListener('change',restoreLocalBackup);
     $('#absenceAdd').addEventListener('click',saveAbsenceIntervalUi);
-    $('#holidayAdd').addEventListener('click',saveHolidayUi);
   }
 
   function setMonth(month) {
@@ -260,6 +288,7 @@
     state.month = month;
     $('#monthPicker').value = month;
     state.selectedDate = month===localMonth() ? localDate() : `${month}-01`;
+    refreshProductionCalendar(Number(month.slice(0,4)));
     loadData();
   }
   function moveMonth(delta) {
@@ -270,6 +299,10 @@
   class GoogleClient {
     constructor(){
       this.appDataConfigName='.work-time-config.json';
+      this.tokenPromise=null;
+      this.initPromise=null;
+      this.clientId='';
+      this.scope='https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata';
     }
     async waitForGis() {
       const deadline = Date.now()+15000;
@@ -281,36 +314,76 @@
     async init() {
       const clientId = config().googleClientId?.trim();
       if (!clientId) throw new Error('Приложение ещё не настроено владельцем: OAuth Client ID не указан в config.js.');
-      await this.waitForGis();
-      state.tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        // Only non-sensitive, per-file scopes. This avoids broad Drive/Sheets access.
-        scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata',
-        callback: () => {}
-      });
+      if (this.clientId===clientId && window.google?.accounts?.oauth2) return;
+      if (this.initPromise) return this.initPromise;
+      this.initPromise=(async()=>{
+        await this.waitForGis();
+        this.clientId=clientId;
+      })();
+      try { await this.initPromise; } finally { this.initPromise=null; }
     }
     async ensureToken(interactive=false) {
-      if (!state.tokenClient) await this.init();
-      if (state.token) return state.token;
-      return new Promise((resolve,reject)=>{
-        state.tokenClient.callback = (response) => {
-          if (response?.error) return reject(new Error(response.error_description || response.error));
-          state.token = response.access_token;
-          resolve(state.token);
-        };
-        state.tokenClient.requestAccessToken({prompt: interactive ? 'consent' : ''});
+      if (state.token && state.tokenExpiresAt && Date.now() < state.tokenExpiresAt - 60000) return state.token;
+      if (state.token || state.tokenExpiresAt) {
+        state.token = null; state.tokenExpiresAt = 0; clearOAuthSession();
+      }
+      if (state.tokenPromise || this.tokenPromise) return state.tokenPromise || this.tokenPromise;
+      // Google Identity Services token requests require a user gesture. Do not call
+      // a popup-less OAuth token request at page load: browsers can reject it.
+      // A valid, short-lived token is restored from sessionStorage after reload; once expired,
+      // the user is asked to click the Google button again.
+      if (!interactive) throw new Error('Срок действия Google-доступа истёк. Нажмите «Войти через Google», чтобы продолжить синхронизацию.');
+      await this.init();
+      const pending = new Promise((resolve,reject)=>{
+        state.tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id:this.clientId,
+          scope:this.scope,
+          callback: (response) => {
+            if (response?.error) { clearOAuthSession(); return reject(new Error(response.error_description || response.error)); }
+            if (!response?.access_token) return reject(new Error('Google не выдал токен доступа. Нажмите «Войти через Google» и подтвердите доступ.'));
+            state.token = response.access_token;
+            state.tokenExpiresAt = Date.now() + Math.max(60, Number(response.expires_in)||3600)*1000;
+            try { sessionStorage.setItem(OAUTH_SESSION_KEY, JSON.stringify({accessToken:state.token,expiresAt:state.tokenExpiresAt})); } catch {}
+            resolve(state.token);
+          },
+          error_callback: (error) => {
+            const messages={popup_closed:'Окно входа Google было закрыто. Нажмите «Войти через Google», чтобы повторить попытку.',popup_failed_to_open:'Браузер заблокировал окно Google. Разрешите всплывающие окна для сайта и повторите попытку.',unknown:'Не удалось открыть окно авторизации Google.'};
+            reject(new Error(messages[error?.type]||messages.unknown));
+          }
+        });
+        try { state.tokenClient.requestAccessToken(); }
+        catch (error) { reject(error); }
       });
+      this.tokenPromise=pending;
+      state.tokenPromise=pending;
+      try { return await pending; }
+      finally { this.tokenPromise=null; state.tokenPromise=null; }
     }
     async authorize(interactive=true) { return this.ensureToken(interactive); }
-    async request(url, opts={}, retry=true) {
-      const token = await this.ensureToken(false);
+    async request(url, opts={}) {
+      let token;
+      try { token = await this.ensureToken(false); }
+      catch (error) {
+        if (!state.token) {
+          state.connected=false; state.mode='auth';
+          showAuthGate(true,error.message||'Нужно повторно подключить Google.');
+          renderConnection();
+        }
+        throw error;
+      }
       const headers = new Headers(opts.headers || {}); headers.set('Authorization', `Bearer ${token}`);
-      let response = await fetch(url,{...opts,headers});
-      if (response.status===401 && retry) { state.token = null; await this.ensureToken(true); return this.request(url,opts,false); }
+      const response = await fetch(url,{...opts,headers});
+      if (response.status===401) {
+        state.token=null; state.tokenExpiresAt=0; clearOAuthSession();
+        state.connected=false; state.mode='auth';
+        const message='Google-доступ истёк или был отозван. Нажмите «Войти через Google», чтобы продолжить.';
+        showAuthGate(true,message); renderConnection();
+        throw new Error(message);
+      }
       if (!response.ok) {
         let message = `Google API: HTTP ${response.status}`;
         try { const j = await response.json(); message = j.error?.message || j.error?.status || message; } catch {}
-        throw new Error(message);
+        const error=new Error(message); error.status=response.status; throw error;
       }
       return response;
     }
@@ -355,18 +428,28 @@
       const encoded = encodeURIComponent(range);
       return this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}/values/${encoded}?majorDimension=ROWS`);
     }
-    async writeRange(id, range, values) {
-      const encoded = encodeURIComponent(range);
-      return this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}/values/${encoded}?valueInputOption=RAW`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({range,majorDimension:'ROWS',values})});
-    }
-    async clearRange(id, range) {
-      const encoded = encodeURIComponent(range);
-      return this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}/values/${encoded}:clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    async driveFileMetadata(id) {
+      const params = new URLSearchParams({fields:'id,name,mimeType,trashed,owners(me)'});
+      return this.json(`${BASE.drive}/files/${encodeURIComponent(id)}?${params}`);
     }
     async writeSheet(id, name, headers, rows) {
-      await this.clearRange(id, `${name}!A:Z`);
-      if (rows.length) await this.writeRange(id, `${name}!A1:${columnName(headers.length)}${rows.length+1}`, [headers,...rows]);
-      else await this.writeRange(id, `${name}!A1:${columnName(headers.length)}1`, [headers]);
+      // Replace a sheet in a single atomic Sheets API batchUpdate. The older clear-then-write
+      // sequence could erase a user's rows if the network failed between the two requests.
+      const spreadsheet=await this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}?fields=sheets.properties(sheetId,title)`);
+      const sheet=(spreadsheet.sheets||[]).map(x=>x.properties).find(x=>x.title===name);
+      if(!sheet || sheet.sheetId==null) throw new Error(`В таблице не найден лист «${name}».`);
+      const values=[headers,...rows];
+      const cellData=value=>{
+        if(value===null||value===undefined||value==='') return {};
+        if(typeof value==='number'&&Number.isFinite(value)) return {userEnteredValue:{numberValue:value}};
+        if(typeof value==='boolean') return {userEnteredValue:{boolValue:value}};
+        return {userEnteredValue:{stringValue:String(value)}};
+      };
+      const requests=[
+        {repeatCell:{range:{sheetId:sheet.sheetId,startColumnIndex:0,endColumnIndex:26},cell:{},fields:'userEnteredValue'}},
+        {updateCells:{start:{sheetId:sheet.sheetId,rowIndex:0,columnIndex:0},rows:values.map(row=>({values:row.map(cellData)})),fields:'userEnteredValue'}}
+      ];
+      return this.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}:batchUpdate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({requests})});
     }
     async exportXlsx(id) {
       const params = new URLSearchParams({mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
@@ -395,29 +478,54 @@
 
   class DataStore {
     async ensureSpreadsheet() {
-      let id = state.spreadsheetId || '';
-      if (!id) {
-        const cfg=await googleClient.readAppDataConfig();
-        id=cfg?.spreadsheetId||'';
+      // The per-user appData mapping is authoritative across devices and browser accounts.
+      // Check it before trusting the browser-local spreadsheet ID, which can be stale/shared.
+      const mapping=await googleClient.readAppDataConfig();
+      let id=mapping?.spreadsheetId || state.spreadsheetId || '';
+      if(id) {
+        try {
+          // A browser-local ID is only a hint; never adopt a sheet owned by another Google user.
+          // appData mapping is scoped to this Google account and remains authoritative.
+          if(!mapping?.spreadsheetId) {
+            let file;
+            try { file=await googleClient.driveFileMetadata(id); }
+            catch(error) {
+              // A stale ID belonging to a different signed-in account is a normal case on a shared device.
+              if([403,404].includes(error.status)) {
+                id=''; localStorage.removeItem('workTime.spreadsheetId');
+              } else {
+                throw new Error('Не удалось проверить старую таблицу Google Drive. Новая таблица не создаётся, чтобы не потерять данные. Проверьте соединение и повторите попытку.');
+              }
+            }
+            if(file) {
+              const ownedByCurrentUser=(file.owners||[]).some(owner=>owner.me===true);
+              if(file.trashed || file.mimeType!=='application/vnd.google-apps.spreadsheet' || !ownedByCurrentUser) {
+                id=''; localStorage.removeItem('workTime.spreadsheetId');
+              }
+            }
+          }
+          if(id) await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:I1`);
+        } catch {
+          if(mapping?.spreadsheetId===id) {
+            throw new Error('Не удалось открыть сохранённую таблицу этого Google-аккаунта. Проверьте доступ к ней; новая таблица автоматически не создаётся, чтобы не потерять данные.');
+          }
+          throw new Error('Не удалось открыть сохранённую таблицу. Новая таблица не создаётся автоматически, чтобы не скрыть старые данные. Проверьте доступ к Google Sheets и повторите попытку.');
+        }
       }
-      if (id) {
-        try { await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:I1`); }
-        catch { id=''; }
-      }
-      if (!id) {
-        const file = await googleClient.createSpreadsheet(config().spreadsheetTitle || 'Work Time Tracker — Data');
+      if(!id) {
+        const file=await googleClient.createSpreadsheet(config().spreadsheetTitle || 'Work Time Tracker — Data');
         id=file.spreadsheetId;
         await this.seedSpreadsheet(id);
-        await googleClient.saveAppDataConfig({version:1,spreadsheetId:id,updatedAt:new Date().toISOString()});
-      } else if (id !== state.spreadsheetId) {
-        state.spreadsheetId=id;
       }
       state.spreadsheetId=id;
       localStorage.setItem('workTime.spreadsheetId',id);
+      if(!mapping || mapping.spreadsheetId!==id || Number(mapping.version)<2) {
+        await googleClient.saveAppDataConfig({version:2,spreadsheetId:id,updatedAt:new Date().toISOString()});
+      }
       return id;
     }
     async seedSpreadsheet(id) {
-      const records=[], days=[], settings=Object.entries({...DEFAULT_SETTINGS,workdays:DEFAULT_SETTINGS.workdays.join(',')}).map(([key,value])=>[key,String(value)]);
+      const records=[], days=[], settings=Object.entries({dailyNormMinutes:480,calendarCountry:'RU',workweek:'5/2',appName:DEFAULT_SETTINGS.appName,currency:'hours',absencePeriods:'[]'}).map(([key,value])=>[key,String(value)]);
       const templates=DEFAULT_TEMPLATES.map(name=>[uid(),name]);
       await Promise.all([
         googleClient.writeSheet(id,SHEET_NAMES.records,HEADERS.records,records),
@@ -442,21 +550,43 @@
       state.settings = parseSettings(settingsRows);
       state.settings.dailyNormMinutes=480;
       if (!Array.isArray(state.settings.workdays) || !state.settings.workdays.length) state.settings.workdays=[...DEFAULT_SETTINGS.workdays];
-      state.periods = Array.isArray(state.settings.absencePeriods) ? state.settings.absencePeriods : state.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''}));
-      state.holidays = Array.isArray(state.settings.holidays) ? state.settings.holidays.map(h=>typeof h==='string'?{date:h,name:'Праздничный день'}:h).filter(h=>h?.date) : [];
+      const configuredPeriods=Array.isArray(state.settings.absencePeriods)?state.settings.absencePeriods:[];
+      const legacyPeriods=state.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''}));
+      state.periods = configuredPeriods.length ? configuredPeriods : legacyPeriods;
+      // Holidays are calculated from the Russian production calendar, never entered by the user.
+      state.holidays = [];
       state.templates = rowsToObjects(HEADERS.templates,templateRows).filter(x=>x.name).map(x=>({id:x.id||uid(),name:String(x.name)}));
-      if (!state.templates.length) state.templates = DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
+      const hasTemplateHeader=(templateRows[0]||[]).map(String).slice(0,HEADERS.templates.length).join('|')===HEADERS.templates.join('|');
+      // Seed defaults only for a genuinely missing/legacy template sheet. A valid empty
+      // TaskTemplates sheet means the user intentionally removed all templates.
+      if (!state.templates.length && !hasTemplateHeader) state.templates = DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
       // Upgrade legacy sheets in place: Jira numeric values become a boolean flag,
       // and task templates are reduced to their name-only schema.
-      await Promise.all([this.writeRecords(), this.writeTemplates(), this.writeSettings()]);
+      const recordHeader=(recordsRows[0]||[]).map(String);
+      const templateHeader=(templateRows[0]||[]).map(String);
+      const legacyJiraValues=recordsRows.slice(1).some(row=>{
+        const v=row[5];
+        return (typeof v==='number') || (typeof v==='string' && v.trim()!=='' && !['true','false','yes','no','да','нет'].includes(v.trim().toLowerCase()));
+      });
+      const needsRecordMigration=recordHeader.slice(0,HEADERS.records.length).join('|')!==HEADERS.records.join('|') || legacyJiraValues;
+      const needsTemplateMigration=templateHeader.slice(0,HEADERS.templates.length).join('|')!==HEADERS.templates.join('|') || templateHeader.length!==HEADERS.templates.length || templateRows.slice(1).some(row=>row.length>HEADERS.templates.length);
+      const settingsHeader=(settingsRows[0]||[]).map(String);
+      const settingsMap=Object.fromEntries(settingsRows.slice(1).filter(row=>row[0]!=null&&String(row[0]).trim()).map(row=>[String(row[0]),String(row[1]??'')]));
+      const expectedSettingKeys=['dailyNormMinutes','calendarCountry','workweek','appName','currency','absencePeriods'].sort();
+      const actualSettingKeys=Object.keys(settingsMap).sort();
+      const needsSettingsMigration=settingsHeader.join('|')!==HEADERS.settings.join('|') || actualSettingKeys.join('|')!==expectedSettingKeys.join('|') || settingsMap.dailyNormMinutes!=='480' || settingsMap.calendarCountry!=='RU' || settingsMap.workweek!=='5/2' || settingsMap.currency!=='hours' || (legacyPeriods.length>0&&!configuredPeriods.length);
+      const writes=[];
+      if(needsRecordMigration) writes.push(this.writeRecords());
+      if(needsTemplateMigration || (!hasTemplateHeader && state.templates.length)) writes.push(this.writeTemplates());
+      if(needsSettingsMigration) writes.push(this.writeSettings());
+      await Promise.all(writes);
       if (state.days.length) { state.days=[]; await this.writeDays(); }
       state.connected=true;
-      await googleClient.saveAppDataConfig({version:2,spreadsheetId:id,updatedAt:new Date().toISOString()});
       return state;
     }
     async writeRecords() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.records,HEADERS.records,state.records.map(r=>HEADERS.records.map(k=>r[k]??''))); }
     async writeDays() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.days,HEADERS.days,state.days.map(r=>HEADERS.days.map(k=>r[k]??''))); }
-    async writeSettings() { const rows=Object.entries({dailyNormMinutes:480,workdays:state.settings.workdays.join(','),appName:state.settings.appName,currency:'hours',absencePeriods:JSON.stringify(state.periods||[]),holidays:JSON.stringify(state.holidays||[])}).map(([k,v])=>[k,String(v)]); await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.settings,HEADERS.settings,rows); }
+    async writeSettings() { const rows=Object.entries({dailyNormMinutes:480,calendarCountry:'RU',workweek:'5/2',appName:state.settings.appName,currency:'hours',absencePeriods:JSON.stringify(state.periods||[])}).map(([k,v])=>[k,String(v)]); await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.settings,HEADERS.settings,rows); }
     async writeTemplates() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.templates,HEADERS.templates,state.templates.map(r=>[r.id,r.name])); }
     async saveRecord(record) {
       const previousRecords=[...state.records];
@@ -484,15 +614,15 @@
     }
     async deleteTemplate(id) { const previous=[...state.templates]; state.templates=state.templates.filter(x=>x.id!==id); try { await this.writeTemplates(); } catch (error) { state.templates=previous; throw error; } }
     async saveSettings(settings) { const previous={...state.settings}; state.settings={...state.settings,...settings}; try { await this.writeSettings(); } catch (error) { state.settings=previous; throw error; } }
-    backupPayload() { return JSON.stringify({version:2,app:'Work Time',exportedAt:new Date().toISOString(),records:state.records,periods:state.periods,holidays:state.holidays,days:[],settings:[{key:'dailyNormMinutes',value:480},{key:'workdays',value:state.settings.workdays.join(',')},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'},{key:'absencePeriods',value:JSON.stringify(state.periods)},{key:'holidays',value:JSON.stringify(state.holidays)}],templates:state.templates.map(t=>({id:t.id,name:t.name}))},null,2); }
+    backupPayload() { return JSON.stringify({version:3,app:'Work Time',exportedAt:new Date().toISOString(),calendar:{country:'RU',workweek:'5/2'},records:state.records,periods:state.periods,days:[],settings:[{key:'dailyNormMinutes',value:480},{key:'calendarCountry',value:'RU'},{key:'workweek',value:'5/2'},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'},{key:'absencePeriods',value:JSON.stringify(state.periods)}],templates:state.templates.map(t=>({id:t.id,name:t.name}))},null,2); }
     async restore(payload) {
-      if(![1,2].includes(payload?.version)) throw new Error('Неподдерживаемый формат резервной копии.');
+      if(![1,2,3].includes(payload?.version)) throw new Error('Неподдерживаемый формат резервной копии.');
       state.records=(Array.isArray(payload.records)?payload.records:[]).map(r=>({...r,jira:isJiraValue(r.jira ?? r.jiraMinutes)}));
       state.days=[];
       const parsedSettings=parseSettings((payload.settings||[]).map(x=>[x.key,x.value]));
       state.settings={...state.settings,...parsedSettings,dailyNormMinutes:480};
       state.periods=Array.isArray(payload.periods)?payload.periods:(Array.isArray(parsedSettings.absencePeriods)?parsedSettings.absencePeriods:(Array.isArray(payload.days)?payload.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''})):[]));
-      state.holidays=(Array.isArray(payload.holidays)?payload.holidays:(Array.isArray(parsedSettings.holidays)?parsedSettings.holidays:[])).map(h=>typeof h==='string'?{date:h,name:'Праздничный день'}:h).filter(h=>h?.date);
+      state.holidays=[]; // Holidays are now derived from the production calendar, not backup overrides.
       state.templates=(Array.isArray(payload.templates)?payload.templates:[]).filter(t=>t.name).map(t=>({id:t.id||uid(),name:String(t.name)}));
       if(!state.templates.length)state.templates=DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
       await Promise.all([this.writeRecords(),this.writeDays(),this.writeSettings(),this.writeTemplates()]);
@@ -507,7 +637,7 @@
   }
   function parseSettings(rows) {
     const map={}; (rows||[]).slice(1).forEach(r=>{if(r?.[0])map[String(r[0])]=r[1]??'';});
-    return {dailyNormMinutes:480,workdays:String(map.workdays||'1,2,3,4,5').split(',').map(Number).filter(n=>n>=1&&n<=5),appName:String(map.appName||DEFAULT_SETTINGS.appName),currency:'hours',absencePeriods:Object.prototype.hasOwnProperty.call(map,'absencePeriods')?safeJson(map.absencePeriods,[]):null,holidays:Object.prototype.hasOwnProperty.call(map,'holidays')?safeJson(map.holidays,[]):[]};
+    return {dailyNormMinutes:480,workdays:[1,2,3,4,5],appName:String(map.appName||DEFAULT_SETTINGS.appName),currency:'hours',calendarCountry:'RU',absencePeriods:Object.prototype.hasOwnProperty.call(map,'absencePeriods')?safeJson(map.absencePeriods,[]):null,holidays:[]};
   }
   function columnName(n) { let s=''; while(n>0){let r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}return s; }
 
@@ -525,18 +655,20 @@
       if(btn){btn.disabled=true;btn.innerHTML='<span data-icon="cloud"></span> Подключаем…';setIcons(btn);}
       setLoader('Подключаем Google','Открываем безопасный доступ к вашей рабочей таблице…');
       await googleClient.authorize(interactive);
+      localStorage.setItem('workTime.preferGoogle','1');
       state.mode='google';
       store=googleStore;
       state.connected=true;
-      await loadData(false);
-      localStorage.setItem('workTime.preferGoogle','1');
+      const loaded=await loadData(false);
+      if(!loaded){setLoader('Синхронизация не завершена','Google авторизован, но таблицу не удалось загрузить. Исправьте ошибку выше и попробуйте ещё раз.',true);return;}
       showAuthGate(false);
       renderConnection();
       setLoader('Work Time готов','Данные синхронизированы',true);
       toast('Google подключён и данные синхронизированы');
     } catch (e) {
       state.mode='auth'; store=googleStore; state.connected=false;
-      showAuthGate(true,e.message || 'Не удалось подключить Google.');
+      const oauthHint = !interactive && /interaction_required|login_required|consent_required|immediate_failed/i.test(String(e.message||'')) ? 'Не удалось восстановить вход автоматически. Нажмите «Войти через Google»; повторное разрешение нужно только если сессия Google завершилась.' : (e.message || 'Не удалось подключить Google.');
+      showAuthGate(true,oauthHint);
       renderConnection();
       setLoader('Нужен вход Google','Нажмите «Войти через Google», чтобы продолжить.',true);
       toast(`Google: ${e.message}`,true);
@@ -546,25 +678,27 @@
   }
   async function disconnectGoogle() {
     try { if(state.token && window.google?.accounts?.oauth2?.revoke){ await new Promise(resolve=>window.google.accounts.oauth2.revoke(state.token,resolve)); } } catch {}
-    state.token=null; state.tokenClient=null; state.connected=false; state.mode='auth'; store=googleStore;
+    state.token=null; state.tokenExpiresAt=0; state.tokenPromise=null; state.tokenClient=null; clearOAuthSession(); state.connected=false; state.mode='auth'; store=googleStore;
     localStorage.removeItem('workTime.spreadsheetId'); localStorage.removeItem('workTime.preferGoogle');
     state.spreadsheetId=''; showAuthGate(true,'Google отключён на этом устройстве. Чтобы продолжить работу, войдите снова.'); renderConnection();
   }
 
   async function loadData(showToast=false) {
-    if (state.busy) return; state.busy=true;
+    if (state.busy) return false; state.busy=true;
     try {
-      if (state.mode!=='google') return;
+      if (state.mode!=='google') return false;
       if (!state.token) await googleClient.authorize(false);
       await store.load();
       syncSettingsToUi(); renderAll(); renderConnection();
       showAuthGate(false);
       if (showToast) toast('Данные обновлены');
+      return true;
     } catch(e) {
       state.connected=false; state.mode='auth';
       showAuthGate(true,e.message||'Не удалось загрузить данные.');
       renderConnection();
       toast(e.message,true);
+      return false;
     } finally { state.busy=false; }
   }
 
@@ -602,7 +736,7 @@
     const today=state.month===localMonth()?localDate():`${state.month}-01`;
     const t=todayTotals();
     const todayStatus=statusForDay(today), todayHoliday=holidayForDay(today);
-    $('#heroTitle').textContent = todayStatus?.label || (todayHoliday ? (typeof todayHoliday==='string'?'Праздничный день':todayHoliday.name||'Праздничный день') : (isBlockedDay(today)?'Выходной':'Рабочий день'));
+    $('#heroTitle').textContent = todayStatus?.label || (todayHoliday ? todayHoliday.name||'Нерабочий день' : (isBlockedDay(today)?'Выходной':'Рабочий день'));
     $('#heroDateLabel').textContent = new Intl.DateTimeFormat('ru-RU',{weekday:'long',day:'numeric',month:'long'}).format(dateFromIso(today));
     $('#todayLogged').textContent=formatHours(t.minutes); $('#todayNorm').textContent=formatHours(t.norm); $('#todayJira').textContent=formatHours(t.jira); $('#todayBalance').textContent=formatSigned(t.minutes-t.norm);
     const pct=t.norm?Math.min(100,(t.minutes/t.norm)*100):100; $('#progressRing').style.background=`conic-gradient(#7b6cff ${pct*3.6}deg,rgba(255,255,255,.10) ${pct*3.6}deg)`;
@@ -620,7 +754,7 @@
       {label:'За месяц',value:formatHours(t.logged),sub:`Норма ${formatHours(t.norm)}`,icon:'clock',tone:'purple'},
       {label:'Баланс',value:formatSigned(t.balance),sub:t.balance>=0?'Время сверх нормы':'Нужно добрать',icon:'check',tone:t.balance>=0?'green':'amber'},
       {label:'Списано в Jira',value:formatHours(t.jira),sub:t.logged?`${Math.round(t.jira/t.logged*100)}% от учтённого времени`:'Пока нет списаний',icon:'zap',tone:'dark'},
-      {label:'Рабочих дней',value:String(monthDays(state.month).filter(d=>minutesForDay(d)>0).length),sub:`Рабочих дней в неделе: ${state.settings.workdays.length}`,icon:'calendar',tone:'green'}
+      {label:'Рабочих дней',value:String(monthDays(state.month).filter(d=>minutesForDay(d)>0).length),sub:'По производственному календарю РФ',icon:'calendar',tone:'green'}
     ];
     $('#statsGrid').innerHTML=cards.map(c=>`<div class="stat-card"><div class="stat-top"><span class="stat-label">${c.label}</span><span class="stat-icon ${c.tone}"><span data-icon="${c.icon}"></span></span></div><div class="stat-value">${c.value}</div><div class="stat-sub">${c.sub}</div></div>`).join(''); setIcons($('#statsGrid'));
   }
@@ -639,9 +773,9 @@
     for(let i=0;i<offset;i++){const d=new Date(y,m-1,1-offset+i);cells.push(`<div class="calendar-cell muted"><div class="calendar-date"><span>${d.getDate()}</span></div></div>`);}
     for(let day=1;day<=total;day++){
       const iso=`${state.month}-${String(day).padStart(2,'0')}`;const t=totalsForDay(iso),tone=dailyTone(iso),selected=iso===state.selectedDate;const explicit=statusForDay(iso);const holiday=holidayForDay(iso);const blocked=isBlockedDay(iso);const absent=!!periodForDay(iso);
-      const note=explicit?explicit.label:(holiday?(typeof holiday==='string'?'Праздник':holiday.name||'Праздник'):(blocked?'Выходной':`${formatHours(t.minutes)} / 8:00`));
-      const badge=explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:holiday?`<span class="pill amber">Праздник</span>`:((!isWorkday(iso)||[6,7].includes(isoWeekday(iso)))?`<span class="pill soft">Выходной</span>`:'');
-      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''} ${blocked?'is-blocked':''}" data-cal-date="${iso}" type="button" title="${escapeAttr(holiday?(typeof holiday==='string'?'Праздничный день':holiday.name||'Праздничный день'):note)}"><div class="calendar-date"><span>${day}</span>${badge}</div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ✓ · `:''}${escapeHtml(note)}</div></button>`);
+      const note=explicit?explicit.label:(holiday?holiday.name:(blocked?'Выходной по производственному календарю':`${formatHours(t.minutes)} / 8:00`));
+      const badge=explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:holiday?`<span class="pill amber">Нерабочий день</span>`:(blocked?`<span class="pill soft">Выходной</span>`:'');
+      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''} ${blocked?'is-blocked':''}" data-cal-date="${iso}" type="button" title="${escapeAttr(holiday?holiday.name:note)}"><div class="calendar-date"><span>${day}</span>${badge}</div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ✓ · `:''}${escapeHtml(note)}</div></button>`);
     }
     $('#calendarGrid').innerHTML=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(x=>`<div class="calendar-weekday">${x}</div>`).join('')+cells.join('');
     setIcons($('#calendarGrid'));
@@ -650,13 +784,12 @@
   }
   function renderSelectedDay() {
     const date=state.selectedDate; const explicit=statusForDay(date); const holiday=holidayForDay(date); const blocked=isBlockedDay(date); const absence=!!periodForDay(date); const t=totalsForDay(date), norm=minutesForDay(date);
-    const fallbackLabel=holiday?(typeof holiday==='string'?'Праздничный день':holiday.name||'Праздничный день'):(blocked?'Выходной':'Рабочий день');
+    const fallbackLabel=holiday?holiday.name:(blocked?'Выходной по производственному календарю':'Рабочий день');
     const meta=explicit||{label:fallbackLabel,tone:blocked?'soft':'soft',icon:blocked?'coffee':'calendar'};
     $('#selectedDayTitle').textContent=formatDate(date,{day:'numeric',month:'long',year:'numeric'});
-    const canEditRecords=isValidWorkDate(date);
-    const rows=recordsForDay(date).map(r=>`<div class="calendar-record"><div class="calendar-record-main"><strong>${escapeHtml(r.task)}</strong><span>${formatHours(r.minutes)}${r.category?` · ${escapeHtml(r.category)}`:''}${r.jira?' · Jira ✓':''}</span>${r.note?`<small>${escapeHtml(r.note)}</small>`:''}</div><div class="row-actions">${canEditRecords?`<button class="row-action" data-cal-edit="${escapeAttr(r.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button>`:''}<button class="row-action" data-cal-delete="${escapeAttr(r.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></div>`).join('');
+    const rows=recordsForDay(date).map(r=>`<div class="calendar-record"><div class="calendar-record-main"><strong>${escapeHtml(r.task)}</strong><span>${formatHours(r.minutes)}${r.category?` · ${escapeHtml(r.category)}`:''}${r.jira?' · Jira ✓':''}</span>${r.note?`<small>${escapeHtml(r.note)}</small>`:''}</div><div class="row-actions"><button class="row-action" data-cal-edit="${escapeAttr(r.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-cal-delete="${escapeAttr(r.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></div>`).join('');
     const addDisabled=blocked||absence;
-    const blockedMessage=holiday?`В праздничный день списание заблокировано${typeof holiday==='object'&&holiday.name?`: ${escapeHtml(holiday.name)}`:''}.`:blocked?([6,7].includes(isoWeekday(date))?'В выходные списание времени заблокировано.':'Эта дата не входит в ваш рабочий график.') :absence?`На период «${escapeHtml(meta.label)}» автоматически учтено 8:00. Ручные списания не нужны.`:'';
+    const blockedMessage=holiday?`По производственному календарю это нерабочий день: ${escapeHtml(holiday.name)}. Ручные списания заблокированы.`:blocked?'По производственному календарю ручные списания в этот день заблокированы.':absence?`На период «${escapeHtml(meta.label)}» автоматически учтено 8:00. Ручные списания не нужны.`:'';
     const recordSection=rows?`<div class="calendar-record-list">${rows}</div>`:'<div class="empty-state compact-empty">Записей за этот день нет.</div>';
     $('#selectedDayContent').innerHTML=`<div class="day-detail"><div class="day-detail-head"><div class="day-detail-icon"><span data-icon="${meta.icon||'calendar'}"></span></div><div><h4>${escapeHtml(meta.label)}</h4><small>${new Intl.DateTimeFormat('ru-RU',{weekday:'long'}).format(dateFromIso(date))}</small></div></div><div class="detail-stat"><div class="detail-chip"><span>Учтено</span><strong>${formatHours(t.minutes)}</strong></div><div class="detail-chip"><span>Норма</span><strong>${formatHours(norm)}</strong></div><div class="detail-chip"><span>Jira ✓</span><strong>${formatHours(t.jira)}</strong></div><div class="detail-chip"><span>Баланс</span><strong>${formatSigned(t.minutes-norm)}</strong></div></div>${blockedMessage?`<div class="calendar-day-notice ${addDisabled?'blocked':'absence'}">${blockedMessage}</div>`:''}<div class="selected-records-head"><strong>Списания</strong>${!addDisabled?`<button class="primary-button compact-button" id="selectedAddRecord"><span data-icon="plus"></span> Добавить</button>`:''}</div>${recordSection}</div>`;
     setIcons($('#selectedDayContent'));
@@ -677,25 +810,18 @@
 
   function renderSettings() {
     $('#settingsAppName').value=state.settings.appName||'Work Time';
-    $('#workdaysPicker').innerHTML=[['Пн',1],['Вт',2],['Ср',3],['Чт',4],['Пт',5],['Сб',6],['Вс',7]].map(([label,n])=>`<button type="button" class="workday-chip ${n<=5&&state.settings.workdays.includes(n)?'active':''}" data-workday="${n}" ${n>=6?'disabled title="Выходные дни всегда заблокированы"':''}>${label}</button>`).join('');
-    $$('#workdaysPicker .workday-chip').forEach(btn=>btn.addEventListener('click',()=>btn.classList.toggle('active')));
+    const pcStatus=$('#productionCalendarStatus'); if(pcStatus) pcStatus.textContent=window.ProductionCalendar?.statusText(Number(state.month.slice(0,4)))||'Российский производственный календарь.';
     const periods=[...state.periods].sort((a,b)=>a.startDate.localeCompare(b.startDate));
     $('#absencePeriodsList').innerHTML=periods.length?periods.map(p=>`<div class="setting-list-row"><div><strong>${escapeHtml(STATUS_META[p.type]?.label||p.type)}</strong><span>${formatDate(p.startDate,{day:'numeric',month:'short',year:'numeric'})} — ${formatDate(p.endDate,{day:'numeric',month:'short',year:'numeric'})}${p.note?` · ${escapeHtml(p.note)}`:''}</span></div><button class="row-action" data-delete-period="${escapeAttr(p.id)}" aria-label="Удалить интервал"><span data-icon="trash"></span></button></div>`).join(''):'<div class="empty-state compact-empty">Интервалы отпуска, больничного и Day off не добавлены.</div>';
-    $('#holidaysList').innerHTML=state.holidays.length?[...state.holidays].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>`<div class="setting-list-row"><div><strong>${escapeHtml(h.name||'Праздничный день')}</strong><span>${formatDate(h.date,{day:'numeric',month:'short',year:'numeric'})}</span></div><button class="row-action" data-delete-holiday="${escapeAttr(h.date)}" aria-label="Удалить праздник"><span data-icon="trash"></span></button></div>`).join(''):'<div class="empty-state compact-empty">Праздничные даты не добавлены. Добавьте дни, когда списание должно быть заблокировано.</div>';
     $$('[data-delete-period]').forEach(btn=>btn.addEventListener('click',()=>deleteAbsencePeriodUi(btn.dataset.deletePeriod)));
-    $$('[data-delete-holiday]').forEach(btn=>btn.addEventListener('click',()=>deleteHolidayUi(btn.dataset.deleteHoliday)));
-    renderBackups(); setIcons($('#view-settings'));
+    if(state.view==='settings') renderBackups(); setIcons($('#view-settings'));
   }
   function syncSettingsToUi() { if($('#settingsAppName')) renderSettings(); }
   async function saveSettingsUi() {
     try {
       if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
-      const workdays=$$('#workdaysPicker .workday-chip.active').map(x=>Number(x.dataset.workday));
-      if(!workdays.length) throw new Error('Выберите хотя бы один рабочий день.');
-      const newlyBlocked=state.records.filter(r=>isWorkday(r.date)&&!workdays.includes(isoWeekday(r.date)));
-      if(newlyBlocked.length) throw new Error(`В ${newlyBlocked.length} списаниях используется день, который вы пытаетесь убрать из рабочего графика. Сначала перенесите или удалите эти записи.`);
       const appName=$('#settingsAppName').value.trim()||'Work Time';
-      await store.saveSettings({dailyNormMinutes:480,workdays,appName});
+      await store.saveSettings({dailyNormMinutes:480,workdays:[1,2,3,4,5],calendarCountry:'RU',appName});
       renderAll(); renderConnection(); toast('Настройки сохранены в Google Sheets.');
     } catch(e) { toast(e.message,true); }
   }
@@ -720,24 +846,6 @@
     const previous=[...state.periods];
     try{state.periods=state.periods.filter(p=>p.id!==id);await store.saveSettings({});renderAll();toast('Интервал удалён.');}catch(e){state.periods=previous;toast(e.message,true);}
   }
-  async function saveHolidayUi() {
-    try {
-      if(state.mode!=='google') throw new Error('Сначала войдите через Google.');
-      const date=$('#holidayDate').value, name=$('#holidayName').value.trim()||'Праздничный день';
-      if(!date) throw new Error('Выберите дату праздника.');
-      if(state.holidays.some(h=>h.date===date)) throw new Error('Эта дата уже добавлена в праздники.');
-      const conflicts=state.records.filter(r=>r.date===date);
-      if(conflicts.length) throw new Error('На эту дату есть списания. Сначала удалите их, затем добавьте праздник.');
-      const previousHolidays=[...state.holidays]; state.holidays.push({date,name}); try { await store.saveSettings({}); } catch (error) { state.holidays=previousHolidays; throw error; }
-      $('#holidayDate').value='';$('#holidayName').value='';renderAll();toast('Праздничная дата добавлена; списание заблокировано.');
-    } catch(e){toast(e.message,true);}
-  }
-  async function deleteHolidayUi(date) {
-    if(!confirm('Убрать эту праздничную дату?'))return;
-    const previous=[...state.holidays];
-    try{state.holidays=state.holidays.filter(h=>h.date!==date);await store.saveSettings({});renderAll();toast('Праздничная дата удалена.');}catch(e){state.holidays=previous;toast(e.message,true);}
-  }
-
   async function createBackup() {
     try {
       const text=store.backupPayload(); const stamp=new Date().toISOString().replace(/[:.]/g,'-'); const name=`work-time-backup_${stamp}.json`;
@@ -783,7 +891,7 @@
       const wb=XLSX.utils.book_new();
       const recordRows=[HEADERS.records,...state.records.map(r=>HEADERS.records.map(k=>r[k]??''))];
       const dayRows=[HEADERS.days,...state.days.map(r=>HEADERS.days.map(k=>r[k]??''))];
-      const settingRows=[HEADERS.settings,['dailyNormMinutes',480],['workdays',state.settings.workdays.join(',')],['appName',state.settings.appName],['currency','hours'],['absencePeriods',JSON.stringify(state.periods)],['holidays',JSON.stringify(state.holidays)]];
+      const settingRows=[HEADERS.settings,['dailyNormMinutes',480],['calendarCountry','RU'],['workweek','5/2'],['appName',state.settings.appName],['currency','hours'],['absencePeriods',JSON.stringify(state.periods)]];
       const templateRows=[HEADERS.templates,...state.templates.map(r=>HEADERS.templates.map(k=>r[k]??''))];
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(recordRows),'Records');
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(dayRows),'Days');
@@ -855,14 +963,26 @@
     $('#brandTitle').textContent=config().appTitle||'Work Time';$('#mobileTitle').textContent=config().appTitle||'Work Time';document.title=config().appTitle||'Work Time';
     state.mode='auth'; state.connected=false; store=googleStore;
     renderAll(); renderConnection();
-    showAuthGate(true);
+    refreshProductionCalendar(Number(state.month.slice(0,4)));
+    $('#app').classList.remove('is-booting');
     if(!config().googleClientId){
       showAuthGate(true,'Владелец приложения ещё не указал OAuth Client ID в config.js.');
       setLoader('Требуется настройка владельца','Сначала добавьте Client ID в config.js.',true);
-    } else {
-      setLoader('Work Time готов','Нажмите «Войти через Google», чтобы начать.',true);
+      return;
     }
-    $('#app').classList.remove('is-booting');
+    // Warm up Google Identity Services on page load. No OAuth window is opened here;
+    // the actual token request stays bound to the user's click on the Google button.
+    googleClient.init().catch(()=>{});
+    const shouldResume = !!state.token && state.tokenExpiresAt > Date.now()+60000;
+    if(shouldResume){
+      showAuthGate(false);
+      setLoader('Восстанавливаем синхронизацию','Используем сохранённую Google-сессию этой вкладки…');
+      await connectGoogle(false);
+    } else {
+      const expiredSession = localStorage.getItem('workTime.preferGoogle')==='1' || !!localStorage.getItem('workTime.spreadsheetId');
+      showAuthGate(true,expiredSession?'Для продолжения нужно возобновить Google-доступ. Нажмите «Войти через Google».':'');
+      setLoader('Work Time готов',expiredSession?'Google-доступ нужно возобновить один раз.':'Нажмите «Войти через Google», чтобы начать.',true);
+    }
   }
 
   // Public fallback: allow adding an export button to the Settings card without rebuilding HTML.
