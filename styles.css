@@ -311,3 +311,52 @@ button { cursor: pointer; }
 .production-calendar-info>div:last-child{display:flex;flex-direction:column;gap:5px;min-width:0}
 .production-calendar-info strong{font-size:13px;line-height:1.4}
 .production-calendar-info span{font-size:12px;line-height:1.5;color:var(--muted,#8b95a7)}
+
+
+/* Work Time v3.2 — links, inline Jira controls and clearer calendar states */
+.text-link { color:#6557c9; text-decoration:underline; text-decoration-color:rgba(101,87,201,.38); text-underline-offset:3px; overflow-wrap:anywhere; transition:color .15s ease,text-decoration-color .15s ease; }
+.text-link:hover { color:#4335ae; text-decoration-color:currentColor; }
+.text-link:focus-visible { outline:2px solid #8173ed; outline-offset:2px; border-radius:3px; }
+.task-anchor { font-weight:800; }
+.recent-copy strong { overflow:hidden; text-overflow:ellipsis; }
+.recent-copy strong .text-link { display:inline; }
+.template-card { transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease; }
+.template-card:hover { transform:translateY(-2px); border-color:#dcd8ff; box-shadow:0 14px 34px rgba(30,35,60,.09); }
+.template-title-link { color:inherit; text-decoration-color:rgba(101,87,201,.25); }
+.template-url-link { display:inline-flex; align-items:center; gap:4px; width:max-content; max-width:100%; font-size:11px; font-weight:800; margin:2px 0 8px; }
+.template-url-link svg { width:13px; height:13px; }
+.calendar-badges { display:flex; align-items:center; justify-content:flex-end; gap:3px; flex-wrap:wrap; max-width:75%; }
+.calendar-badges .pill { font-size:8px; padding:3px 5px; line-height:1.1; }
+.calendar-cell.jira-incomplete { border-color:#f2b5b5; }
+.calendar-cell.jira-incomplete::after { content:""; position:absolute; left:10px; right:10px; bottom:0; height:3px; background:#e65c62; border-radius:99px; }
+.calendar-cell.jira-incomplete.selected { border-color:#da6a70; }
+.pill.jira-warning { background:#fff0f0; color:#b93441; border:1px solid #f5cccc; }
+.calendar-legend i.jira-missing { background:#e65c62; }
+.calendar-record { align-items:flex-start; transition:border-color .15s ease,background .15s ease; }
+.calendar-record.jira-pending { border-left:3px solid #e56a70; }
+.calendar-record.jira-done { border-left:3px solid #45b987; }
+.calendar-record-main { flex:1; }
+.calendar-record-main strong { line-height:1.45; }
+.calendar-record-main span { line-height:1.45; }
+.calendar-record-main small { display:block; line-height:1.5; overflow-wrap:anywhere; color:#747d8e; }
+.jira-toggle { display:inline-flex; align-items:center; align-self:flex-start; gap:7px; max-width:100%; margin-top:5px; padding:6px 9px; border:1px solid #f1c5c7; border-radius:9px; background:#fff7f7; color:#a73e47; font:inherit; font-size:10px; font-weight:700; line-height:1.25; cursor:pointer; text-align:left; transition:background .15s ease,border-color .15s ease,transform .15s ease; }
+.jira-toggle:hover { background:#fff0f1; border-color:#e5a2a7; }
+.jira-toggle:active { transform:scale(.98); }
+.jira-toggle:focus-visible { outline:2px solid #d66b73; outline-offset:2px; }
+.jira-toggle:disabled { opacity:.55; cursor:wait; }
+.jira-toggle.is-checked { border-color:#bce9d3; background:#f0fbf5; color:#19764d; }
+.jira-toggle.is-checked:hover { background:#e4f8ed; border-color:#8ed8b4; }
+.jira-toggle-box { display:grid; place-items:center; flex:0 0 15px; width:15px; height:15px; border-radius:4px; border:1px solid currentColor; font-size:10px; font-weight:900; }
+.jira-day-notice { display:flex; align-items:flex-start; gap:8px; margin-top:12px; padding:11px 12px; border:1px solid #f2c5c8; border-radius:12px; background:#fff4f4; color:#a43d46; font-size:11px; line-height:1.5; }
+.jira-day-notice::before { content:"!"; display:grid; place-items:center; flex:0 0 17px; width:17px; height:17px; border-radius:50%; background:#e86670; color:#fff; font-size:11px; font-weight:900; }
+.calendar-record .row-actions { flex:0 0 auto; }
+.calendar-record .row-action { width:31px; height:31px; }
+@media (max-width:560px) {
+  .calendar-badges { max-width:70%; }
+  .calendar-badges .pill { font-size:7px; padding:3px 4px; }
+  .calendar-cell.jira-incomplete::after { left:6px; right:6px; }
+  .calendar-record { gap:6px; padding:9px; }
+  .calendar-record .row-actions { display:flex; flex-direction:column; gap:5px; }
+  .jira-toggle { font-size:10px; padding:7px 8px; }
+  .calendar-legend { gap:9px 12px; font-size:9px; }
+}

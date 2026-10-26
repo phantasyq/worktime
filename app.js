@@ -14,10 +14,10 @@
     templates: 'TaskTemplates'
   };
   const HEADERS = {
-    records: ['id','date','task','category','minutes','jira','note','createdAt','updatedAt'],
+    records: ['id','date','task','category','minutes','jira','note','createdAt','updatedAt','taskUrl'],
     days: ['date','status','comment','updatedAt'],
     settings: ['key','value'],
-    templates: ['id','name']
+    templates: ['id','name','url']
   };
   const DEFAULT_SETTINGS = {
     dailyNormMinutes: 480,
@@ -136,6 +136,40 @@
 
   function escapeHtml(v='') { return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
   function escapeAttr(v='') { return escapeHtml(v).replace(/`/g,'&#96;'); }
+  function normalizeHttpUrl(value) {
+    const raw=String(value??'').trim();
+    if(!raw) return '';
+    if(/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^https?:\/\//i.test(raw)) throw new Error('Поддерживаются только ссылки http:// и https://.');
+    const candidate=/^https?:\/\//i.test(raw)?raw:`https://${raw}`;
+    let parsed;
+    try { parsed=new URL(candidate); } catch { throw new Error('Введите корректную ссылку, например https://example.com.'); }
+    if(!['http:','https:'].includes(parsed.protocol) || !parsed.hostname) throw new Error('Ссылка должна начинаться с http:// или https://.');
+    return parsed.href;
+  }
+  function safeStoredUrl(value) {
+    try { return normalizeHttpUrl(value); } catch { return ''; }
+  }
+  function linkifyText(value='') {
+    const raw=String(value??'');
+    const pattern=/https?:\/\/[^\s<>"']+|www\.[^\s<>"']+/gi;
+    let result='', cursor=0, match;
+    while((match=pattern.exec(raw))) {
+      let candidate=match[0], trailing='';
+      while(/[.,!?;:)]$/.test(candidate)) { trailing=candidate.slice(-1)+trailing; candidate=candidate.slice(0,-1); }
+      result+=escapeHtml(raw.slice(cursor,match.index));
+      const href=safeStoredUrl(candidate);
+      if(href) result+=`<a class="text-link" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(candidate)}</a>`;
+      else result+=escapeHtml(candidate);
+      result+=escapeHtml(trailing); cursor=match.index+match[0].length;
+    }
+    return result+escapeHtml(raw.slice(cursor)).replace(/\n/g,'<br>');
+  }
+  function renderTaskLabel(record) {
+    const label=String(record?.task??'');
+    const href=safeStoredUrl(record?.taskUrl);
+    if(href) return `<a class="text-link task-anchor" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+    return linkifyText(label);
+  }
   function formatHours(minutes) {
     const m = Math.max(0, Math.round(Number(minutes)||0));
     const h = Math.floor(m/60); const mm = m%60;
@@ -504,7 +538,7 @@
               }
             }
           }
-          if(id) await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:I1`);
+          if(id) await googleClient.readRange(id, `${SHEET_NAMES.records}!A1:J1`);
         } catch {
           if(mapping?.spreadsheetId===id) {
             throw new Error('Не удалось открыть сохранённую таблицу этого Google-аккаунта. Проверьте доступ к ней; новая таблица автоматически не создаётся, чтобы не потерять данные.');
@@ -526,7 +560,7 @@
     }
     async seedSpreadsheet(id) {
       const records=[], days=[], settings=Object.entries({dailyNormMinutes:480,calendarCountry:'RU',workweek:'5/2',appName:DEFAULT_SETTINGS.appName,currency:'hours',absencePeriods:'[]'}).map(([key,value])=>[key,String(value)]);
-      const templates=DEFAULT_TEMPLATES.map(name=>[uid(),name]);
+      const templates=DEFAULT_TEMPLATES.map(name=>[uid(),name,'']);
       await Promise.all([
         googleClient.writeSheet(id,SHEET_NAMES.records,HEADERS.records,records),
         googleClient.writeSheet(id,SHEET_NAMES.days,HEADERS.days,days),
@@ -537,15 +571,15 @@
     async load() {
       const id = await this.ensureSpreadsheet();
       const ranges = [
-        `${SHEET_NAMES.records}!A1:I`,
+        `${SHEET_NAMES.records}!A1:J`,
         `${SHEET_NAMES.days}!A1:D`,
         `${SHEET_NAMES.settings}!A1:B`,
-        `${SHEET_NAMES.templates}!A1:E`
+        `${SHEET_NAMES.templates}!A1:C`
       ].map(encodeURIComponent).join('&ranges=');
       const data = await googleClient.json(`${BASE.sheets}/spreadsheets/${encodeURIComponent(id)}/values:batchGet?majorDimension=ROWS&ranges=${ranges}`);
       const valueRanges = data.valueRanges || [];
       const [recordsRows,daysRows,settingsRows,templateRows] = valueRanges.map(x=>x.values||[]);
-      state.records = rowsToObjects(HEADERS.records,recordsRows).map(r=>({ ...r, minutes:Number(r.minutes)||0, jira:isJiraValue(r.jira ?? r.jiraMinutes) }));
+      state.records = rowsToObjects(HEADERS.records,recordsRows).map(r=>({ ...r, minutes:Number(r.minutes)||0, jira:isJiraValue(r.jira ?? r.jiraMinutes), taskUrl:safeStoredUrl(r.taskUrl) }));
       state.days = rowsToObjects(HEADERS.days,daysRows);
       state.settings = parseSettings(settingsRows);
       state.settings.dailyNormMinutes=480;
@@ -555,7 +589,7 @@
       state.periods = configuredPeriods.length ? configuredPeriods : legacyPeriods;
       // Holidays are calculated from the Russian production calendar, never entered by the user.
       state.holidays = [];
-      state.templates = rowsToObjects(HEADERS.templates,templateRows).filter(x=>x.name).map(x=>({id:x.id||uid(),name:String(x.name)}));
+      state.templates = rowsToObjects(HEADERS.templates,templateRows).filter(x=>x.name).map(x=>({id:x.id||uid(),name:String(x.name),url:safeStoredUrl(x.url)}));
       const hasTemplateHeader=(templateRows[0]||[]).map(String).slice(0,HEADERS.templates.length).join('|')===HEADERS.templates.join('|');
       // Seed defaults only for a genuinely missing/legacy template sheet. A valid empty
       // TaskTemplates sheet means the user intentionally removed all templates.
@@ -587,11 +621,11 @@
     async writeRecords() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.records,HEADERS.records,state.records.map(r=>HEADERS.records.map(k=>r[k]??''))); }
     async writeDays() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.days,HEADERS.days,state.days.map(r=>HEADERS.days.map(k=>r[k]??''))); }
     async writeSettings() { const rows=Object.entries({dailyNormMinutes:480,calendarCountry:'RU',workweek:'5/2',appName:state.settings.appName,currency:'hours',absencePeriods:JSON.stringify(state.periods||[])}).map(([k,v])=>[k,String(v)]); await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.settings,HEADERS.settings,rows); }
-    async writeTemplates() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.templates,HEADERS.templates,state.templates.map(r=>[r.id,r.name])); }
+    async writeTemplates() { await googleClient.writeSheet(state.spreadsheetId,SHEET_NAMES.templates,HEADERS.templates,state.templates.map(r=>[r.id,r.name,r.url||''])); }
     async saveRecord(record) {
       const previousRecords=[...state.records];
       const now = new Date().toISOString();
-      const next = {...record,id:record.id||uid(),minutes:Number(record.minutes),jira:!!record.jira,createdAt:record.createdAt||now,updatedAt:now};
+      const next = {...record,id:record.id||uid(),minutes:Number(record.minutes),jira:!!record.jira,taskUrl:safeStoredUrl(record.taskUrl),createdAt:record.createdAt||now,updatedAt:now};
       if (!next.task.trim()) throw new Error('Укажите задачу.');
       if (!(next.minutes>0) || next.minutes>1440) throw new Error('Время должно быть от 1 минуты до 24 часов.');
       if (!isValidWorkDate(next.date)) throw new Error('Списывать время можно только в рабочие дни, кроме праздников и периодов отсутствия.');
@@ -608,22 +642,22 @@
     async deleteDay(date) { state.days=state.days.filter(x=>x.date!==date); await this.writeDays(); }
     async saveTemplate(t) {
       const previous=[...state.templates];
-      const row={id:t.id||uid(),name:String(t.name||'').trim()}; if(!row.name) throw new Error('Укажите название задачи.');
+      const row={id:t.id||uid(),name:String(t.name||'').trim(),url:normalizeHttpUrl(t.url||'')}; if(!row.name) throw new Error('Укажите название задачи.');
       const idx=state.templates.findIndex(x=>x.id===row.id); if(idx>=0)state.templates[idx]=row;else state.templates.push(row);
       try { await this.writeTemplates(); return row; } catch (error) { state.templates=previous; throw error; }
     }
     async deleteTemplate(id) { const previous=[...state.templates]; state.templates=state.templates.filter(x=>x.id!==id); try { await this.writeTemplates(); } catch (error) { state.templates=previous; throw error; } }
     async saveSettings(settings) { const previous={...state.settings}; state.settings={...state.settings,...settings}; try { await this.writeSettings(); } catch (error) { state.settings=previous; throw error; } }
-    backupPayload() { return JSON.stringify({version:3,app:'Work Time',exportedAt:new Date().toISOString(),calendar:{country:'RU',workweek:'5/2'},records:state.records,periods:state.periods,days:[],settings:[{key:'dailyNormMinutes',value:480},{key:'calendarCountry',value:'RU'},{key:'workweek',value:'5/2'},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'},{key:'absencePeriods',value:JSON.stringify(state.periods)}],templates:state.templates.map(t=>({id:t.id,name:t.name}))},null,2); }
+    backupPayload() { return JSON.stringify({version:4,app:'Work Time',exportedAt:new Date().toISOString(),calendar:{country:'RU',workweek:'5/2'},records:state.records,periods:state.periods,days:[],settings:[{key:'dailyNormMinutes',value:480},{key:'calendarCountry',value:'RU'},{key:'workweek',value:'5/2'},{key:'appName',value:state.settings.appName},{key:'currency',value:'hours'},{key:'absencePeriods',value:JSON.stringify(state.periods)}],templates:state.templates.map(t=>({id:t.id,name:t.name,url:t.url||''}))},null,2); }
     async restore(payload) {
-      if(![1,2,3].includes(payload?.version)) throw new Error('Неподдерживаемый формат резервной копии.');
-      state.records=(Array.isArray(payload.records)?payload.records:[]).map(r=>({...r,jira:isJiraValue(r.jira ?? r.jiraMinutes)}));
+      if(![1,2,3,4].includes(payload?.version)) throw new Error('Неподдерживаемый формат резервной копии.');
+      state.records=(Array.isArray(payload.records)?payload.records:[]).map(r=>({...r,jira:isJiraValue(r.jira ?? r.jiraMinutes),taskUrl:safeStoredUrl(r.taskUrl)}));
       state.days=[];
       const parsedSettings=parseSettings((payload.settings||[]).map(x=>[x.key,x.value]));
       state.settings={...state.settings,...parsedSettings,dailyNormMinutes:480};
       state.periods=Array.isArray(payload.periods)?payload.periods:(Array.isArray(parsedSettings.absencePeriods)?parsedSettings.absencePeriods:(Array.isArray(payload.days)?payload.days.filter(d=>d.status&&d.status!=='work'&&STATUS_META[d.status]).map(d=>({id:uid(),startDate:d.date,endDate:d.date,type:d.status,note:d.comment||''})):[]));
       state.holidays=[]; // Holidays are now derived from the production calendar, not backup overrides.
-      state.templates=(Array.isArray(payload.templates)?payload.templates:[]).filter(t=>t.name).map(t=>({id:t.id||uid(),name:String(t.name)}));
+      state.templates=(Array.isArray(payload.templates)?payload.templates:[]).filter(t=>t.name).map(t=>({id:t.id||uid(),name:String(t.name),url:safeStoredUrl(t.url)}));
       if(!state.templates.length)state.templates=DEFAULT_TEMPLATES.map(name=>({id:uid(),name}));
       await Promise.all([this.writeRecords(),this.writeDays(),this.writeSettings(),this.writeTemplates()]);
     }
@@ -758,13 +792,15 @@
     ];
     $('#statsGrid').innerHTML=cards.map(c=>`<div class="stat-card"><div class="stat-top"><span class="stat-label">${c.label}</span><span class="stat-icon ${c.tone}"><span data-icon="${c.icon}"></span></span></div><div class="stat-value">${c.value}</div><div class="stat-sub">${c.sub}</div></div>`).join(''); setIcons($('#statsGrid'));
   }
+  function hasIncompleteJira(date) { const rows=recordsForDay(date); return rows.length>0 && rows.some(r=>!isJiraValue(r.jira)); }
+
   function dailyTone(date) {
     const t=totalsForDay(date), norm=minutesForDay(date);
     if(isBlockedDay(date) || !norm) return 'off'; if(periodForDay(date)) return 'good'; if(t.minutes===norm) return 'good'; if(t.minutes>norm) return 'warn'; return 'bad';
   }
   function renderRecent() {
     const rows=state.records.slice().sort((a,b)=>String(b.updatedAt||b.date).localeCompare(String(a.updatedAt||a.date))).slice(0,7);
-    $('#recentEntries').innerHTML=rows.length?rows.map(r=>`<div class="recent-row"><div class="task-dot">${escapeHtml((r.task||'•').trim()[0]?.toUpperCase()||'•')}</div><div class="recent-copy"><strong>${escapeHtml(r.task)}</strong><span>${formatDate(r.date,{day:'2-digit',month:'short'})}${r.category?` · ${escapeHtml(r.category)}`:''}</span></div><div class="recent-time">${formatHours(r.minutes)}${r.jira?' · Jira ✓':''}</div></div>`).join(''):`<div class="empty-state">Записей пока нет.</div>`;
+    $('#recentEntries').innerHTML=rows.length?rows.map(r=>`<div class="recent-row"><div class="task-dot">${escapeHtml((r.task||'•').trim()[0]?.toUpperCase()||'•')}</div><div class="recent-copy"><strong>${renderTaskLabel(r)}</strong><span>${formatDate(r.date,{day:'2-digit',month:'short'})}${r.category?` · ${escapeHtml(r.category)}`:''}</span></div><div class="recent-time">${formatHours(r.minutes)}${r.jira?' · Jira ✓':''}</div></div>`).join(''):`<div class="empty-state">Записей пока нет.</div>`;
   }
 
   function renderCalendar() {
@@ -772,10 +808,10 @@
     const [y,m]=state.month.split('-').map(Number); const first=new Date(y,m-1,1); const offset=(first.getDay()||7)-1; const total=daysInMonth(state.month); const cells=[];
     for(let i=0;i<offset;i++){const d=new Date(y,m-1,1-offset+i);cells.push(`<div class="calendar-cell muted"><div class="calendar-date"><span>${d.getDate()}</span></div></div>`);}
     for(let day=1;day<=total;day++){
-      const iso=`${state.month}-${String(day).padStart(2,'0')}`;const t=totalsForDay(iso),tone=dailyTone(iso),selected=iso===state.selectedDate;const explicit=statusForDay(iso);const holiday=holidayForDay(iso);const blocked=isBlockedDay(iso);const absent=!!periodForDay(iso);
+      const iso=`${state.month}-${String(day).padStart(2,'0')}`;const t=totalsForDay(iso),tone=dailyTone(iso),selected=iso===state.selectedDate;const explicit=statusForDay(iso);const holiday=holidayForDay(iso);const blocked=isBlockedDay(iso);const absent=!!periodForDay(iso);const jiraIncomplete=hasIncompleteJira(iso);
       const note=explicit?explicit.label:(holiday?holiday.name:(blocked?'Выходной по производственному календарю':`${formatHours(t.minutes)} / 8:00`));
-      const badge=explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:holiday?`<span class="pill amber">Нерабочий день</span>`:(blocked?`<span class="pill soft">Выходной</span>`:'');
-      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''} ${blocked?'is-blocked':''}" data-cal-date="${iso}" type="button" title="${escapeAttr(holiday?holiday.name:note)}"><div class="calendar-date"><span>${day}</span>${badge}</div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ✓ · `:''}${escapeHtml(note)}</div></button>`);
+      const badge=explicit?`<span class="pill ${explicit.tone}">${escapeHtml(explicit.label)}</span>`:holiday?`<span class="pill amber">Праздник</span>`:(blocked?`<span class="pill soft">Выходной</span>`:'');
+      cells.push(`<button class="calendar-cell ${tone} ${selected?'selected':''} ${blocked?'is-blocked':''} ${jiraIncomplete?'jira-incomplete':''}" data-cal-date="${iso}" type="button" title="${escapeAttr(jiraIncomplete?'Есть списания, не отмеченные в Jira':(holiday?holiday.name:note))}"><div class="calendar-date"><span>${day}</span><span class="calendar-badges">${badge}${jiraIncomplete?'<span class="pill jira-warning" title="Не все списания отмечены в Jira">Jira !</span>':''}</span></div><div class="hours">${t.minutes?formatHours(t.minutes):'—'}</div><div class="sub">${t.jira?`Jira ✓ · `:''}${escapeHtml(note)}</div></button>`);
     }
     $('#calendarGrid').innerHTML=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(x=>`<div class="calendar-weekday">${x}</div>`).join('')+cells.join('');
     setIcons($('#calendarGrid'));
@@ -787,13 +823,15 @@
     const fallbackLabel=holiday?holiday.name:(blocked?'Выходной по производственному календарю':'Рабочий день');
     const meta=explicit||{label:fallbackLabel,tone:blocked?'soft':'soft',icon:blocked?'coffee':'calendar'};
     $('#selectedDayTitle').textContent=formatDate(date,{day:'numeric',month:'long',year:'numeric'});
-    const rows=recordsForDay(date).map(r=>`<div class="calendar-record"><div class="calendar-record-main"><strong>${escapeHtml(r.task)}</strong><span>${formatHours(r.minutes)}${r.category?` · ${escapeHtml(r.category)}`:''}${r.jira?' · Jira ✓':''}</span>${r.note?`<small>${escapeHtml(r.note)}</small>`:''}</div><div class="row-actions"><button class="row-action" data-cal-edit="${escapeAttr(r.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-cal-delete="${escapeAttr(r.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></div>`).join('');
+    const dayRecords=recordsForDay(date); const jiraIncomplete=hasIncompleteJira(date);
+    const rows=dayRecords.map(r=>`<div class="calendar-record ${isJiraValue(r.jira)?'jira-done':'jira-pending'}"><div class="calendar-record-main"><strong>${renderTaskLabel(r)}</strong><span>${formatHours(r.minutes)}${r.category?` · ${escapeHtml(r.category)}`:''}</span>${r.note?`<small>${linkifyText(r.note)}</small>`:''}<button type="button" class="jira-toggle ${isJiraValue(r.jira)?'is-checked':''}" data-cal-jira="${escapeAttr(r.id)}" aria-pressed="${isJiraValue(r.jira)}"><span class="jira-toggle-box">${isJiraValue(r.jira)?'✓':''}</span><span>${isJiraValue(r.jira)?'Списано в Jira':'Отметить списание в Jira'}</span></button></div><div class="row-actions"><button class="row-action" data-cal-edit="${escapeAttr(r.id)}" aria-label="Редактировать списание" title="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-cal-delete="${escapeAttr(r.id)}" aria-label="Удалить списание" title="Удалить"><span data-icon="trash"></span></button></div></div>`).join('');
     const addDisabled=blocked||absence;
     const blockedMessage=holiday?`По производственному календарю это нерабочий день: ${escapeHtml(holiday.name)}. Ручные списания заблокированы.`:blocked?'По производственному календарю ручные списания в этот день заблокированы.':absence?`На период «${escapeHtml(meta.label)}» автоматически учтено 8:00. Ручные списания не нужны.`:'';
     const recordSection=rows?`<div class="calendar-record-list">${rows}</div>`:'<div class="empty-state compact-empty">Записей за этот день нет.</div>';
-    $('#selectedDayContent').innerHTML=`<div class="day-detail"><div class="day-detail-head"><div class="day-detail-icon"><span data-icon="${meta.icon||'calendar'}"></span></div><div><h4>${escapeHtml(meta.label)}</h4><small>${new Intl.DateTimeFormat('ru-RU',{weekday:'long'}).format(dateFromIso(date))}</small></div></div><div class="detail-stat"><div class="detail-chip"><span>Учтено</span><strong>${formatHours(t.minutes)}</strong></div><div class="detail-chip"><span>Норма</span><strong>${formatHours(norm)}</strong></div><div class="detail-chip"><span>Jira ✓</span><strong>${formatHours(t.jira)}</strong></div><div class="detail-chip"><span>Баланс</span><strong>${formatSigned(t.minutes-norm)}</strong></div></div>${blockedMessage?`<div class="calendar-day-notice ${addDisabled?'blocked':'absence'}">${blockedMessage}</div>`:''}<div class="selected-records-head"><strong>Списания</strong>${!addDisabled?`<button class="primary-button compact-button" id="selectedAddRecord"><span data-icon="plus"></span> Добавить</button>`:''}</div>${recordSection}</div>`;
+    $('#selectedDayContent').innerHTML=`<div class="day-detail"><div class="day-detail-head"><div class="day-detail-icon"><span data-icon="${meta.icon||'calendar'}"></span></div><div><h4>${escapeHtml(meta.label)}</h4><small>${new Intl.DateTimeFormat('ru-RU',{weekday:'long'}).format(dateFromIso(date))}</small></div></div><div class="detail-stat"><div class="detail-chip"><span>Учтено</span><strong>${formatHours(t.minutes)}</strong></div><div class="detail-chip"><span>Норма</span><strong>${formatHours(norm)}</strong></div><div class="detail-chip"><span>Jira ✓</span><strong>${formatHours(t.jira)}</strong></div><div class="detail-chip"><span>Баланс</span><strong>${formatSigned(t.minutes-norm)}</strong></div></div>${blockedMessage?`<div class="calendar-day-notice ${addDisabled?'blocked':'absence'}">${blockedMessage}</div>`:''}${jiraIncomplete?'<div class="jira-day-notice">Есть списания, не отмеченные в Jira. Отметьте их прямо здесь — открывать редактирование не нужно.</div>':''}<div class="selected-records-head"><strong>Списания</strong>${!addDisabled?`<button class="primary-button compact-button" id="selectedAddRecord"><span data-icon="plus"></span> Добавить</button>`:''}</div>${recordSection}</div>`;
     setIcons($('#selectedDayContent'));
     $('#selectedAddRecord')?.addEventListener('click',()=>openRecordModal(null,date));
+    $$('[data-cal-jira]').forEach(btn=>btn.addEventListener('click',async()=>{const row=state.records.find(x=>x.id===btn.dataset.calJira);if(!row)return;btn.disabled=true;try{await store.saveRecord({...row,jira:!isJiraValue(row.jira)});renderAll();toast(row.jira?'Списанию снята отметка Jira':'Списание отмечено как списанное в Jira');}catch(e){btn.disabled=false;toast(e.message,true);}}));
     $$('[data-cal-edit]').forEach(btn=>btn.addEventListener('click',()=>openRecordModal(state.records.find(x=>x.id===btn.dataset.calEdit))));
     $$('[data-cal-delete]').forEach(btn=>btn.addEventListener('click',()=>deleteRecordUi(btn.dataset.calDelete)));
   }
@@ -801,7 +839,7 @@
   function renderTemplates() {
     if(!state.templates.length){$('#templatesGrid').innerHTML='<div class="empty-state">Шаблонов нет. Создайте первый.</div>';return;}
     const icons=['zap','briefcase','coffee','wrench','file-spreadsheet'];
-    $('#templatesGrid').innerHTML=state.templates.map((t,i)=>`<article class="template-card"><div class="template-top"><span class="template-icon"><span data-icon="${icons[i%icons.length]}"></span></span><span class="pill soft">Шаблон</span></div><h3>${escapeHtml(t.name)}</h3><p>Только название задачи — длительность задаётся при списании.</p><div class="template-actions"><button class="primary-button template-main" data-use-template="${escapeAttr(t.id)}">Добавить списание</button><button class="row-action" data-edit-template="${escapeAttr(t.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-delete-template="${escapeAttr(t.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></article>`).join('');
+    $('#templatesGrid').innerHTML=state.templates.map((t,i)=>`<article class="template-card"><div class="template-top"><span class="template-icon"><span data-icon="${icons[i%icons.length]}"></span></span><span class="pill soft">Шаблон</span></div><h3>${t.url?`<a class="text-link template-title-link" href="${escapeAttr(t.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t.name)}</a>`:linkifyText(t.name)}</h3>${t.url?`<a class="template-url-link" href="${escapeAttr(t.url)}" target="_blank" rel="noopener noreferrer"><span data-icon="arrow-up-right"></span> Открыть ссылку</a>`:''}<p>Шаблон сохраняет название и ссылку. Длительность задаётся при списании.</p><div class="template-actions"><button class="primary-button template-main" data-use-template="${escapeAttr(t.id)}">Добавить списание</button><button class="row-action" data-edit-template="${escapeAttr(t.id)}" aria-label="Редактировать"><span data-icon="edit"></span></button><button class="row-action" data-delete-template="${escapeAttr(t.id)}" aria-label="Удалить"><span data-icon="trash"></span></button></div></article>`).join('');
     setIcons($('#templatesGrid'));
     $$('[data-use-template]').forEach(btn=>btn.addEventListener('click',()=>{const t=state.templates.find(x=>x.id===btn.dataset.useTemplate);state.selectedDate=state.selectedDate||localDate();switchView('calendar');renderCalendar();if(isValidWorkDate(state.selectedDate))openRecordModal(null,state.selectedDate,t);else toast('Выберите рабочий день в календаре.',true);}));
     $$('[data-edit-template]').forEach(btn=>btn.addEventListener('click',()=>openTemplateModal(state.templates.find(x=>x.id===btn.dataset.editTemplate))));
@@ -903,17 +941,18 @@
   function openRecordModal(record=null,date=state.selectedDate,template=null) {
     const targetDate=record?.date||date||localDate();
     if(!record && !isValidWorkDate(targetDate)){toast(blockedDateMessage(targetDate),true);return;}
-    const r=record||{date:targetDate,task:template?.name||'',category:'',minutes:60,jira:false,note:''};
+    const r=record||{date:targetDate,task:template?.name||'',taskUrl:template?.url||'',category:'',minutes:60,jira:false,note:''};
     const templateOptions=`<option value="">Шаблон…</option>${state.templates.map(t=>`<option value="${escapeAttr(t.id)}">${escapeHtml(t.name)}</option>`).join('')}`;
-    openModal(`<div class="form-grid"><label class="field-label">Дата<input id="recordDate" class="field" type="date" value="${escapeAttr(r.date||targetDate)}"></label><label class="field-label">Шаблон<select id="recordTemplate" class="field">${templateOptions}</select></label></div><label class="field-label">Задача<input id="recordTask" class="field" value="${escapeAttr(r.task||'')}" placeholder="Например: подготовка отчёта" autofocus></label><div class="form-grid"><label class="field-label">Категория<input id="recordCategory" class="field" list="categoryList" value="${escapeAttr(r.category||'')}" placeholder="Разработка"><datalist id="categoryList"><option>Разработка</option><option>Встречи</option><option>Поддержка</option><option>Аналитика</option><option>Документация</option></datalist></label><label class="field-label">Время<input id="recordMinutes" class="field" value="${durationInput(r.minutes||60)}" placeholder="1:30"></label></div><div class="form-grid"><label class="check-field"><input id="recordJira" type="checkbox" ${isJiraValue(r.jira ?? r.jiraMinutes)?'checked':''}><span>Списано в Jira</span></label><label class="field-label">Комментарий<input id="recordNote" class="field" value="${escapeAttr(r.note||'')}" placeholder="Необязательно"></label></div><p class="form-hint">Формат длительности: <strong>1:30</strong> или <strong>1.5</strong> часа. Полный рабочий день — 8:00.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveRecordBtn"><span data-icon="check"></span> Сохранить</button></div>`,record?'Редактировать списание':'Новое списание',true);
-    $('#recordTemplate').addEventListener('change',e=>{const t=state.templates.find(x=>x.id===e.target.value);if(t)$('#recordTask').value=t.name;});
+    openModal(`<div class="form-grid"><label class="field-label">Дата<input id="recordDate" class="field" type="date" value="${escapeAttr(r.date||targetDate)}"></label><label class="field-label">Шаблон<select id="recordTemplate" class="field">${templateOptions}</select></label></div><label class="field-label">Задача<input id="recordTask" class="field" value="${escapeAttr(r.task||'')}" placeholder="Например: подготовка отчёта" autofocus></label><label class="field-label">Ссылка на задачу<input id="recordTaskUrl" class="field" type="url" value="${escapeAttr(r.taskUrl||template?.url||'')}" placeholder="https://jira.example.com/browse/PROJ-123"></label><div class="form-grid"><label class="field-label">Категория<input id="recordCategory" class="field" list="categoryList" value="${escapeAttr(r.category||'')}" placeholder="Разработка"><datalist id="categoryList"><option>Разработка</option><option>Встречи</option><option>Поддержка</option><option>Аналитика</option><option>Документация</option></datalist></label><label class="field-label">Время<input id="recordMinutes" class="field" value="${durationInput(r.minutes||60)}" placeholder="1:30"></label></div><div class="form-grid"><label class="check-field"><input id="recordJira" type="checkbox" ${isJiraValue(r.jira ?? r.jiraMinutes)?'checked':''}><span>Списано в Jira</span></label><label class="field-label">Комментарий<input id="recordNote" class="field" value="${escapeAttr(r.note||'')}" placeholder="Необязательно"></label></div><p class="form-hint">Формат длительности: <strong>1:30</strong> или <strong>1.5</strong> часа. Полный рабочий день — 8:00.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveRecordBtn"><span data-icon="check"></span> Сохранить</button></div>`,record?'Редактировать списание':'Новое списание',true);
+    if(template?.id) $('#recordTemplate').value=template.id;
+    $('#recordTemplate').addEventListener('change',e=>{const t=state.templates.find(x=>x.id===e.target.value);if(t){$('#recordTask').value=t.name;$('#recordTaskUrl').value=t.url||'';}});
     $('[data-close-modal]').addEventListener('click',closeModal);
     $('#saveRecordBtn').addEventListener('click',async()=>{
       try{
         setBusyButton('#saveRecordBtn',true);
         const newDate=$('#recordDate').value;
         if(!isValidWorkDate(newDate)) throw new Error(blockedDateMessage(newDate));
-        const payload={...r,id:r.id,date:newDate,task:$('#recordTask').value.trim(),category:$('#recordCategory').value.trim(),minutes:parseDuration($('#recordMinutes').value),jira:$('#recordJira').checked,note:$('#recordNote').value.trim()};
+        const payload={...r,id:r.id,date:newDate,task:$('#recordTask').value.trim(),taskUrl:normalizeHttpUrl($('#recordTaskUrl').value),category:$('#recordCategory').value.trim(),minutes:parseDuration($('#recordMinutes').value),jira:$('#recordJira').checked,note:$('#recordNote').value.trim()};
         await store.saveRecord(payload);closeModal();state.selectedDate=payload.date;state.month=payload.date.slice(0,7);$('#monthPicker').value=state.month;toast(record?'Списание обновлено':'Время записано');renderAll();switchView('calendar');renderCalendar();
       }catch(e){toast(e.message,true);}finally{setBusyButton('#saveRecordBtn',false);}
     });
@@ -922,9 +961,9 @@
 
   function openTemplateModal(template=null) {
     const t=template||{name:''};
-    openModal(`<label class="field-label">Название задачи<input id="templateName" class="field" value="${escapeAttr(t.name)}" autofocus placeholder="Например: Разработка"></label><p class="form-hint">Шаблон хранит только название. Дату, длительность и Jira-флаг вы задаёте при добавлении списания.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveTemplateBtn"><span data-icon="check"></span> Сохранить</button></div>`,template?'Редактирование шаблона':'Новый шаблон');
+    openModal(`<label class="field-label">Название задачи<input id="templateName" class="field" value="${escapeAttr(t.name||'')}" autofocus placeholder="Например: Разработка"></label><label class="field-label">Ссылка для шаблона<input id="templateUrl" class="field" type="url" value="${escapeAttr(t.url||'')}" placeholder="https://jira.example.com/browse/PROJ-123"></label><p class="form-hint">Ссылка подставится в новое списание из этого шаблона. Длительность и Jira-флаг задаются отдельно при списании.</p><div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button class="primary-button" id="saveTemplateBtn"><span data-icon="check"></span> Сохранить</button></div>`,template?'Редактирование шаблона':'Новый шаблон');
     $('[data-close-modal]').addEventListener('click',closeModal);
-    $('#saveTemplateBtn').addEventListener('click',async()=>{try{setBusyButton('#saveTemplateBtn',true);await store.saveTemplate({id:t.id,name:$('#templateName').value.trim()});closeModal();renderAll();toast('Шаблон сохранён');}catch(e){toast(e.message,true);}finally{setBusyButton('#saveTemplateBtn',false);}});
+    $('#saveTemplateBtn').addEventListener('click',async()=>{try{setBusyButton('#saveTemplateBtn',true);await store.saveTemplate({id:t.id,name:$('#templateName').value.trim(),url:normalizeHttpUrl($('#templateUrl').value)});closeModal();renderAll();toast('Шаблон сохранён');}catch(e){toast(e.message,true);}finally{setBusyButton('#saveTemplateBtn',false);}});
   }
   async function deleteTemplateUi(id) { if(!confirm('Удалить шаблон?'))return; try{await store.deleteTemplate(id);renderAll();toast('Шаблон удалён');}catch(e){toast(e.message,true);} }
 
